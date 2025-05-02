@@ -10,6 +10,7 @@ import time
 import sys
 import os
 import json
+import pickle
 
 from torchmd.forces import Forces
 from torchmd.parameters import Parameters
@@ -30,7 +31,26 @@ import simulate
 
 MODEL_PATH = "/home/argon/Stuff/harmonic_net_2025.04.06/model_high_density_benchmark_CA_only_2025.04.03_mix1_s100_CA_lj_bondNull_angleNull_dihedralNull_cutoff2_seq6_harBAD_termBAD100__wd0_plateaulr5en4_0.1_0_1en3_1en7_bs4_chunk120"
 TOPOLOGY_PATH = "/mnt/secondary/argon/benchmark_inputs_2025.04.03/chignolin_start_0.pdb"
+TICA_MODEL_PATH = "/home/argon/Stuff/tica_2025.04.22/chignolin_300K.tica"
 
+class TICA_PCoord():
+    def __init__(self, model_path, components=[0]):
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+            # assert isinstance(model, TicaModel)
+            assert hasattr(model, "tica_model")
+        self.tica_model = model.tica_model
+        assert isinstance(components, list)
+        self.components = components
+
+    def calculate(self, data):
+        assert len(data.shape) == 3, "Data must be (frames, atoms, xyz)"
+        n_atoms = data.shape[1]
+        pairs_a, pairs_b = np.triu_indices(n_atoms, k=1)
+        distances = np.linalg.norm(data[:,pairs_a] - data[:, pairs_b], axis=2)
+        distances /= 10 # The TICA model expects nm, the data is in Ang
+        tica_comps = self.tica_model.transform(distances)
+        return tica_comps[:, self.components]
 
 class TestPropagator(WESTPropagator):
     def __init__(self, rc=None):
@@ -90,15 +110,18 @@ class TestPropagator(WESTPropagator):
 
         self.mol = mol
 
+        self.pcoord_calculator = TICA_PCoord(TICA_MODEL_PATH, [0])
+
 
     def get_pcoord(self, state):
+        #FIXME: I don't think this ever gets called? w_run seems to only use the values in segment.pcoord
         print(state)
 
         # I belive we get a BasisState when it wants us to start from a file (or really whatever basis_state.auxref represents)
         # and an InitialState when it wants us to generate something?
         if isinstance(state, BasisState):
             print("state.auxref", state.auxref)
-            return [0.0, 0.5, 1.0]
+            raise NotImplementedError
         # elif isinstance(state, InitialState):
         else:
             raise NotImplementedError
@@ -119,12 +142,9 @@ class TestPropagator(WESTPropagator):
         # print("##", self.num_active, len(segments))
 
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
-        
-        
 
         replicas = 1
         
-
         for segment in segments:
             starttime = time.time()
 
@@ -169,6 +189,9 @@ class TestPropagator(WESTPropagator):
             self.md_system.set_velocities(velocities)
             self.md_system.set_positions(coords)
 
+            #FIXME: Would also avoid the round trip here
+            parent_pos = self.md_system.pos.detach().cpu().numpy()
+
             trajEpot = []
             trajEkin = []
             trajTemp = []
@@ -189,6 +212,7 @@ class TestPropagator(WESTPropagator):
                 trajVel.append(currvel)
 
             i = 0 #FIXME: This assumes no replicas
+
             np.savez(os.path.join(segment_outdir, "seg.npz"),
                 epot = np.array([f[i] for f in trajEpot]),
                 ekin = np.array([f[i] for f in trajEkin]),
@@ -197,6 +221,12 @@ class TestPropagator(WESTPropagator):
                 pos  = np.array([f[i] for f in trajPos]),
                 vel  = np.array([f[i] for f in trajVel]),
             )
+
+            pcoord_pos = np.array([parent_pos[i]] + [f[i] for f in trajPos])
+            # print("segment.pcoord", segment.pcoord)
+            segment.pcoord = self.pcoord_calculator.calculate(pcoord_pos)
+            # print("segment.pcoord", segment.pcoord)
+            print("segment.pcoord[-1]", segment.pcoord[-1])
 
             segment.status = Segment.SEG_STATUS_COMPLETE
 
