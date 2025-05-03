@@ -114,14 +114,13 @@ class TestPropagator(WESTPropagator):
 
 
     def get_pcoord(self, state):
-        #FIXME: I don't think this ever gets called? w_run seems to only use the values in segment.pcoord
-        print(state)
-
-        # I belive we get a BasisState when it wants us to start from a file (or really whatever basis_state.auxref represents)
-        # and an InitialState when it wants us to generate something?
+        # This function gets called to find the initial pcoord of a starting state
         if isinstance(state, BasisState):
-            print("state.auxref", state.auxref)
-            raise NotImplementedError
+            # print("state.auxref", state.auxref)
+            # FIXME: Pay attention to what the intial state was
+            bstate_mol = self.mol
+            # print("bstate_mol.coords", bstate_mol.coords.shape)
+            return self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
         # elif isinstance(state, InitialState):
         else:
             raise NotImplementedError
