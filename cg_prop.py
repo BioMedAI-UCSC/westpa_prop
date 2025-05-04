@@ -19,12 +19,6 @@ from torchmd.integrator import maxwell_boltzmann
 from torchmd.integrator import Integrator
 from torchmd.wrapper import Wrapper
 
-CGSCHNET_SCRIPTS = "/home/argon/openmm/cgschnet/cgschnet/cgschnet/scripts/"
-if not CGSCHNET_SCRIPTS in sys.path:
-    sys.path.append(CGSCHNET_SCRIPTS)
-
-import simulate
-
 # https://westpa.readthedocs.io/en/stable/documentation/core/westpa.core.propagators.html
 # https://github.com/westpa/westpa/blob/b3afe209fcffc6238c1d2ec700059c7e30f2adca/src/westpa/core/propagators/executable.py#L688
 
@@ -53,6 +47,12 @@ class TestPropagator(WESTPropagator):
         super(TestPropagator, self).__init__(rc)
 
         device = "cuda"
+
+        cgschnet_path = self.rc.config.require(['west', 'cg_prop', 'cgschnet_path'])
+        #FIXME: It would be better to do this without modifying sys.path
+        if not cgschnet_path in sys.path:
+            sys.path.append(cgschnet_path)
+        import simulate
 
         checkpoint_path = self.rc.config.require(['west', 'cg_prop', 'model_path'])
         topology_path = self.rc.config.require(['west', 'cg_prop', 'topology_path'])
