@@ -207,5 +207,6 @@ class TestPropagator(WESTPropagator):
 
             segment.walltime = time.time() - starttime
             # segment.cputime = rusage.ru_utime
+        print(f"Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
         
         return segments
