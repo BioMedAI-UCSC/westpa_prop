@@ -60,7 +60,8 @@ class TestPropagator(WESTPropagator):
         # input_path = os.path.expandvars('$WEST_SIM_ROOT/bstates/bstate0.pdb')
         input_path = TOPOLOGY_PATH
         use_box = False
-        replicas = 1
+        # replicas = 1
+        self.replicas = self.rc.config.get_typed(['west', 'propagation', 'block_size'], int, 1)
         temperature = 300
 
         checkpoint_path = MODEL_PATH
@@ -80,14 +81,14 @@ class TestPropagator(WESTPropagator):
         mol, embeddings = simulate.load_molecule(prior_path, prior_params, input_path, use_box=use_box, verbose=False)
 
         calcs = []
-        calcs.append(simulate.build_calc(self.model, mol, embeddings, use_box=use_box, replicas=replicas,
+        calcs.append(simulate.build_calc(self.model, mol, embeddings, use_box=use_box, replicas=self.replicas,
                                 temperature=temperature, device=device))
         
         forceterms = prior_params["forceterms"]
         exclusions = prior_params["exclusions"]
 
         #FIXME: There should be as many mols as replicas
-        system, forces = simulate.make_system([mol], prior_path, calcs, device, forceterms, exclusions, replicas, temperature=temperature, new_ff=True)
+        system, forces = simulate.make_system([mol], prior_path, calcs, device, forceterms, exclusions, self.replicas, temperature=temperature, new_ff=True)
         self.md_system = system
         self.md_forces = forces
 
@@ -130,6 +131,7 @@ class TestPropagator(WESTPropagator):
         raise NotImplementedError
     
     def propagate(self, segments):
+
         # print("self.basis_states", self.basis_states)
         # print("self.initial_states", self.initial_states)
         # # print(dir(segments[0]))
@@ -140,77 +142,78 @@ class TestPropagator(WESTPropagator):
 
         # print("##", self.num_active, len(segments))
 
+        starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
 
-        replicas = 1
-        
-        for segment in segments:
-            starttime = time.time()
+        assert len(segments) <= self.replicas
 
+        # Initialize replicas for this iteration
+        parent_pos = []
+        for i, segment in enumerate(segments):
             if segment.initpoint_type == Segment.SEG_INITPOINT_CONTINUES:
-                print("Seg continue")
-                # From the executable propagator
+                # Parent logic from the executable propagator
                 parent = Segment(n_iter=segment.n_iter - 1, seg_id=segment.parent_id)
                 parent_outdir = (segment_pattern.format(segment=parent))
                 parent_outdir = os.path.expandvars(parent_outdir)
 
                 parent_traj = np.load(os.path.join(parent_outdir, "seg.npz"))
-                velocities = np.expand_dims(parent_traj["vel"][-1], 0)
-                velocities = torch.as_tensor(velocities)
-                coords = np.expand_dims(parent_traj["pos"][-1], -1)
-                # print(velocities.shape)
-                # print(coords.shape)
+                coords = torch.as_tensor(parent_traj["pos"][-1])
+                velocities = torch.as_tensor(parent_traj["vel"][-1])
 
             elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-                print("Seg from bstate")
                 # Could also be InitialState.ISTATE_TYPE_START but we don't support that mode
                 initial_state = self.initial_states[segment.initial_state_id]
                 assert initial_state.istate_type == InitialState.ISTATE_TYPE_BASIS
                 # TODO: Pay attention to what the basis state was
                 # basis_state = self.basis_states[initial_state.basis_state_id]
 
-                velocities = maxwell_boltzmann(self.md_forces.par.masses, self.temperature, replicas)
-                coords = self.mol.coords.copy()
+                bstate_mol = self.mol
+                coords = torch.as_tensor(bstate_mol.coords.reshape(-1, 3))
+                velocities = maxwell_boltzmann(self.md_forces.par.masses, self.temperature, 1)[0]
 
+            self.md_system.pos[i][:] = coords
+            self.md_system.vel[i][:] = velocities
+            parent_pos.append(coords.numpy())
 
+        #TODO: Set seed
+
+        # coords, velocities, ?box?
+        # "Positions shape must be (natoms, 3, 1) or (natoms, 3, nreplicas)"
+        # "Velocities shape must be (nreplicas, natoms, 3)"
+        #FIXME: Would probably make more sense to set these directly that deal with the weird shapes
+        # self.md_system.set_velocities(velocities)
+        # self.md_system.set_positions(coords)
+
+        #FIXME: Would also avoid the round trip here
+        # parent_pos = self.md_system.pos.detach().cpu().numpy()
+
+        # The integrator expects the forces to be valid before the first step() is called
+        Epot = self.md_forces.compute(self.md_system.pos, self.md_system.box, self.md_system.forces)
+
+        trajEpot = []
+        trajEkin = []
+        trajTemp = []
+        trajTime = []
+        trajPos  = []
+        trajVel  = []
+        for i in range(1, int(self.steps / self.save_steps) + 1):
+            Ekin, Epot, T = self.integrator.step(niter=self.save_steps)
+            self.wrapper.wrap(self.md_system.pos, self.md_system.box)
+            currpos = self.md_system.pos.detach().cpu().numpy()
+            currvel = self.md_system.vel.detach().cpu().numpy()
+
+            trajEkin.append(Ekin)
+            trajEpot.append(Epot)
+            trajTemp.append(T)
+            trajTime.append(np.repeat(i*self.timestep, self.replicas))
+            trajPos.append(currpos)
+            trajVel.append(currvel)
+
+        # Save each replica to its corresponding segment
+        for i, segment in enumerate(segments):
             segment_outdir = (segment_pattern.format(segment=segment))
             segment_outdir = os.path.expandvars(segment_outdir)
             os.makedirs(segment_outdir, exist_ok=True)
-
-            # coords, velocities, ?box?
-            # "Positions shape must be (natoms, 3, 1) or (natoms, 3, nreplicas)"
-            # "Velocities shape must be (nreplicas, natoms, 3)"
-
-
-            #TODO: Set seed
-
-            #FIXME: Would probably make more sense to set these directly that deal with the weird shapes
-            self.md_system.set_velocities(velocities)
-            self.md_system.set_positions(coords)
-
-            #FIXME: Would also avoid the round trip here
-            parent_pos = self.md_system.pos.detach().cpu().numpy()
-
-            trajEpot = []
-            trajEkin = []
-            trajTemp = []
-            trajTime = []
-            trajPos  = []
-            trajVel  = []
-            for i in range(1, int(self.steps / self.save_steps) + 1):
-                Ekin, Epot, T = self.integrator.step(niter=self.save_steps)
-                self.wrapper.wrap(self.md_system.pos, self.md_system.box)
-                currpos = self.md_system.pos.detach().cpu().numpy()
-                currvel = self.md_system.vel.detach().cpu().numpy()
-
-                trajEkin.append(Ekin)
-                trajEpot.append(Epot)
-                trajTemp.append(T)
-                trajTime.append(np.repeat(i*self.timestep, replicas))
-                trajPos.append(currpos)
-                trajVel.append(currvel)
-
-            i = 0 #FIXME: This assumes no replicas
 
             np.savez(os.path.join(segment_outdir, "seg.npz"),
                 epot = np.array([f[i] for f in trajEpot]),
@@ -222,10 +225,8 @@ class TestPropagator(WESTPropagator):
             )
 
             pcoord_pos = np.array([parent_pos[i]] + [f[i] for f in trajPos])
-            # print("segment.pcoord", segment.pcoord)
             segment.pcoord = self.pcoord_calculator.calculate(pcoord_pos)
-            # print("segment.pcoord", segment.pcoord)
-            print("segment.pcoord[-1]", segment.pcoord[-1])
+            # print("segment.pcoord[-1]", segment.pcoord[-1])
 
             segment.status = Segment.SEG_STATUS_COMPLETE
 
