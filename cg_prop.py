@@ -29,10 +29,6 @@ import simulate
 # https://github.com/westpa/westpa/blob/b3afe209fcffc6238c1d2ec700059c7e30f2adca/src/westpa/core/propagators/executable.py#L688
 
 
-MODEL_PATH = "/home/argon/Stuff/harmonic_net_2025.04.06/model_high_density_benchmark_CA_only_2025.04.03_mix1_s100_CA_lj_bondNull_angleNull_dihedralNull_cutoff2_seq6_harBAD_termBAD100__wd0_plateaulr5en4_0.1_0_1en3_1en7_bs4_chunk120"
-TOPOLOGY_PATH = "/mnt/secondary/argon/benchmark_inputs_2025.04.03/chignolin_start_0.pdb"
-TICA_MODEL_PATH = "/home/argon/Stuff/tica_2025.04.22/chignolin_300K.tica"
-
 class TICA_PCoord():
     def __init__(self, model_path, components=[0]):
         with open(model_path, 'rb') as f:
@@ -57,18 +53,22 @@ class TestPropagator(WESTPropagator):
         super(TestPropagator, self).__init__(rc)
 
         device = "cuda"
-        # input_path = os.path.expandvars('$WEST_SIM_ROOT/bstates/bstate0.pdb')
-        input_path = TOPOLOGY_PATH
-        use_box = False
-        # replicas = 1
-        self.replicas = self.rc.config.get_typed(['west', 'propagation', 'block_size'], int, 1)
-        temperature = 300
 
-        checkpoint_path = MODEL_PATH
+        checkpoint_path = self.rc.config.require(['west', 'cg_prop', 'model_path'])
+        topology_path = self.rc.config.require(['west', 'cg_prop', 'topology_path'])
+
+        self.replicas = self.rc.config.get_typed(['west', 'propagation', 'block_size'], int, 1)
+        use_box = self.rc.config.get_typed(['west', 'cg_prop', 'use_box'], bool, False)
+        self.temperature = self.rc.config.get_typed(['west', 'cg_prop', 'temperature'], int, 300)
+
+        self.steps = self.rc.config.require(['west', 'cg_prop', 'steps'], int)
+        self.save_steps = self.rc.config.require(['west', 'cg_prop', 'save_steps'], int)
+        self.timestep = self.rc.config.require(['west', 'cg_prop', 'timestep'], int)
 
         if os.path.isdir(checkpoint_path):
             checkpoint_path = os.path.join(checkpoint_path, "checkpoint-best.pth")
         checkpoint_dir = os.path.dirname(checkpoint_path)
+        assert os.path.exists(checkpoint_path)
 
         prior_path = os.path.join(checkpoint_dir, "priors.yaml")
         assert os.path.exists(prior_path)
@@ -78,23 +78,21 @@ class TestPropagator(WESTPropagator):
             prior_params = json.load(file)
         
         self.model = simulate.load_model(checkpoint_path, device, verbose=False)
-        mol, embeddings = simulate.load_molecule(prior_path, prior_params, input_path, use_box=use_box, verbose=False)
+        mol, embeddings = simulate.load_molecule(prior_path, prior_params, topology_path, use_box=use_box, verbose=False)
 
         calcs = []
         calcs.append(simulate.build_calc(self.model, mol, embeddings, use_box=use_box, replicas=self.replicas,
-                                temperature=temperature, device=device))
+                                temperature=self.temperature, device=device))
         
         forceterms = prior_params["forceterms"]
         exclusions = prior_params["exclusions"]
 
         #FIXME: There should be as many mols as replicas
-        system, forces = simulate.make_system([mol], prior_path, calcs, device, forceterms, exclusions, self.replicas, temperature=temperature, new_ff=True)
+        system, forces = simulate.make_system([mol], prior_path, calcs, device, forceterms, exclusions, self.replicas, temperature=self.temperature, new_ff=True)
         self.md_system = system
         self.md_forces = forces
 
-        self.timestep = 1
         langevin_gamma = 1
-        self.temperature = temperature
 
         self.integrator = Integrator(
             system,
@@ -105,14 +103,13 @@ class TestPropagator(WESTPropagator):
             T=self.temperature,
         )
         self.wrapper = Wrapper(mol.numAtoms, mol.bonds if len(mol.bonds) else None, device)
-
-        self.steps = 1000
-        self.save_steps = 100
-
         self.mol = mol
 
-        self.pcoord_calculator = TICA_PCoord(TICA_MODEL_PATH, [0])
-
+        # Intialize pcoord calculator from the values in west.cfg
+        pcoord_config = dict(self.rc.config['west', 'cg_prop', 'pcoord_calculator'])
+        pcoord_calculator_class_path = pcoord_config.pop("class")
+        pcoord_calculator_class = westpa.core.extloader.get_object(pcoord_calculator_class_path)
+        self.pcoord_calculator = pcoord_calculator_class(**pcoord_config)
 
     def get_pcoord(self, state):
         # This function gets called to find the initial pcoord of a starting state
@@ -122,8 +119,7 @@ class TestPropagator(WESTPropagator):
             bstate_mol = self.mol
             # print("bstate_mol.coords", bstate_mol.coords.shape)
             return self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
-        # elif isinstance(state, InitialState):
-        else:
+        elif isinstance(state, InitialState):
             raise NotImplementedError
         raise NotImplementedError
     
@@ -131,17 +127,6 @@ class TestPropagator(WESTPropagator):
         raise NotImplementedError
     
     def propagate(self, segments):
-
-        # print("self.basis_states", self.basis_states)
-        # print("self.initial_states", self.initial_states)
-        # # print(dir(segments[0]))
-        # print(segments[0].data, segments[0].seg_id, segments[0].n_iter)
-        # print(segments[0].parent_id, segments[0].initial_state_id)
-        # print((self.rc.config['west', 'data', 'data_refs', 'segment'].format(segment=segments[0])))
-        # print((self.rc.config['west', 'data', 'data_refs', 'basis_state']))
-
-        # print("##", self.num_active, len(segments))
-
         starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
 
@@ -175,17 +160,7 @@ class TestPropagator(WESTPropagator):
             self.md_system.vel[i][:] = velocities
             parent_pos.append(coords.numpy())
 
-        #TODO: Set seed
-
-        # coords, velocities, ?box?
-        # "Positions shape must be (natoms, 3, 1) or (natoms, 3, nreplicas)"
-        # "Velocities shape must be (nreplicas, natoms, 3)"
-        #FIXME: Would probably make more sense to set these directly that deal with the weird shapes
-        # self.md_system.set_velocities(velocities)
-        # self.md_system.set_positions(coords)
-
-        #FIXME: Would also avoid the round trip here
-        # parent_pos = self.md_system.pos.detach().cpu().numpy()
+        #TODO: Set seed?
 
         # The integrator expects the forces to be valid before the first step() is called
         Epot = self.md_forces.compute(self.md_system.pos, self.md_system.box, self.md_system.forces)
