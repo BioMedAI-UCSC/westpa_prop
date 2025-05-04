@@ -52,7 +52,7 @@ class TestPropagator(WESTPropagator):
         #FIXME: It would be better to do this without modifying sys.path
         if not cgschnet_path in sys.path:
             sys.path.append(cgschnet_path)
-        import simulate
+        import simulate  #pyright: ignore[reportMissingImports]
 
         checkpoint_path = self.rc.config.require(['west', 'cg_prop', 'model_path'])
         topology_path = self.rc.config.require(['west', 'cg_prop', 'topology_path'])
