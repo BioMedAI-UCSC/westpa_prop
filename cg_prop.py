@@ -65,6 +65,8 @@ class TestPropagator(WESTPropagator):
         self.save_steps = self.rc.config.require(['west', 'cg_prop', 'save_steps'], int)
         self.timestep = self.rc.config.require(['west', 'cg_prop', 'timestep'], int)
 
+        assert not use_box, "Box initialization not implemented yet"
+
         if os.path.isdir(checkpoint_path):
             checkpoint_path = os.path.join(checkpoint_path, "checkpoint-best.pth")
         checkpoint_dir = os.path.dirname(checkpoint_path)
