@@ -1,0 +1,11 @@
+*.swp
+.vscode/
+*.out
+*.ipynb_checkpoints/
+*.pyc
+**/__pycache__/
+
+traj_segs
+west.h5
+pdist.h5
+hist.pdf
