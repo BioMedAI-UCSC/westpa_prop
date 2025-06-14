@@ -12,6 +12,7 @@ import numpy as np
 import time
 import os
 import sys
+import json
 
 # Import TICA_PCoord from your existing file
 from cg_prop import TICA_PCoord
@@ -19,7 +20,15 @@ from cg_prop import TICA_PCoord
 class OpenMMPropagator(WESTPropagator):
     def __init__(self, rc=None):
         super(OpenMMPropagator, self).__init__(rc)
-        
+
+
+        cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path'])
+        #FIXME: It would be better to do this without modifying sys.path
+        if not cgschnet_path in sys.path:
+            sys.path.append(cgschnet_path)
+        import simulate  #pyright: ignore[reportMissingImports]
+
+
         # Load configuration
         topology_path = self.rc.config.require(['west', 'openmm', 'topology_path'])
         # Expand environment variables in topology path
@@ -81,23 +90,34 @@ class OpenMMPropagator(WESTPropagator):
         pcoord_calculator_class_path = pcoord_config.pop("class")
         pcoord_calculator_class = westpa.core.extloader.get_object(pcoord_calculator_class_path)
         self.pcoord_calculator = pcoord_calculator_class(**pcoord_config)
+
+        self.checkpoint_path = self.rc.config.require(['west', 'openmm', 'model_path'])
+        checkpoint_path = self.checkpoint_path
+        if os.path.isdir(checkpoint_path):
+            checkpoint_path = os.path.join(checkpoint_path, "checkpoint-best.pth")
+        checkpoint_dir = os.path.dirname(checkpoint_path)
+        assert os.path.exists(checkpoint_path)
+
+        prior_path = os.path.join(checkpoint_dir, "priors.yaml")
+        assert os.path.exists(prior_path)
+        prior_params_path = os.path.join(checkpoint_dir, "prior_params.json")
+
+        with open(f"{prior_params_path}", 'r') as file:
+            prior_params = json.load(file)
+    
+        self.mol, embeddings = simulate.load_molecule(prior_path, prior_params, topology_path, use_box=False, verbose=False)
+
+
     
     def get_pcoord(self, state):
         # Handle basis states
         if isinstance(state, BasisState):
-            pdb_path = state.auxref
-            pdb = PDBFile(pdb_path)
-            
-            # Extract coordinates and reshape for TICA_PCoord
-            positions = np.array([coord.value_in_unit(nanometer) for coord in pdb.positions])
-            positions = positions.reshape(1, -1, 3)  
-            
-            # Convert nm to Angstroms if needed by TICA_PCoord
-            positions *= 10  # Now in Angstroms for TICA_PCoord which will divide by 10
-            
-            state.pcoord = self.pcoord_calculator.calculate(positions)
+            # print("state.auxref", state.auxref)
+            # FIXME: Pay attention to what the intial state was
+            bstate_mol = self.mol
+            # print("bstate_mol.coords", bstate_mol.coords.shape)
+            state.pcoord = self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
             return
-            
         elif isinstance(state, InitialState):
             raise NotImplementedError
             
@@ -106,87 +126,68 @@ class OpenMMPropagator(WESTPropagator):
     def propagate(self, segments):
         starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
-        
+
         for segment in segments:
-            # Create output directory
-            segment_outdir = segment_pattern.format(segment=segment)
-            segment_outdir = os.path.expandvars(segment_outdir)
+            segment_outdir = os.path.expandvars(segment_pattern.format(segment=segment))
             os.makedirs(segment_outdir, exist_ok=True)
-            
-            # Create symlink to basis state PDB for trajectory visualization
-            bstate_path = os.path.join(self.rc.config.get(['west', 'data', 'data_refs', 'basis_state']).replace('{basis_state.auxref}', 'bstate.pdb'))
-            os.symlink(bstate_path, os.path.join(segment_outdir, 'bstate.pdb'))
-            
+
+            # NOTE: Removed basis state symlink
+            # os.symlink(...)  ← This line is now gone
+
             # Set up initial positions and velocities
             if segment.initpoint_type == Segment.SEG_INITPOINT_CONTINUES:
-                # Load from parent segment
                 parent = Segment(n_iter=segment.n_iter - 1, seg_id=segment.parent_id)
                 parent_outdir = os.path.expandvars(segment_pattern.format(segment=parent))
-                
-                # Load final state from parent
                 try:
                     with open(os.path.join(parent_outdir, "seg.xml"), 'r') as f:
                         xml = f.read()
                         self.simulation.context.setState(XmlSerializer.deserialize(xml))
-                        
-                    # Get initial positions for pcoord calculation
                     state = self.simulation.context.getState(getPositions=True)
                     initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-                    initial_pos = np.array([initial_pos])  # Add frame dimension
+                    initial_pos = np.array([initial_pos])
                 except Exception as e:
                     print(f"Error loading parent state: {e}")
                     raise
-                    
+
             elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-                # For a new trajectory, start from a basis state
-                initial_state = self.initial_states[segment.initial_state_id]
-                basis_state = self.basis_states[initial_state.basis_state_id]
-                
-                # Load positions from PDB
-                pdb_path = basis_state.auxref
-                pdb = PDBFile(pdb_path)
-                self.simulation.context.setPositions(pdb.positions)
-                
-                # Set velocities according to temperature
+                # Start from topology PDB directly
+                self.simulation.context.setPositions(self.pdb.positions)
                 self.simulation.context.setVelocitiesToTemperature(self.temperature * kelvin)
-                
-                # Get initial positions for pcoord calculation
                 state = self.simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-                initial_pos = np.array([initial_pos])  # Add frame dimension
-            
-            # Setup DCD reporter for trajectory
+                initial_pos = np.array([initial_pos])
+
+            # Use topology file directly for MDTraj
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             self.simulation.reporters.clear()
             self.simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
-            
-            # Run simulation
+
             print(f"Running {self.steps} steps for segment {segment.seg_id}")
             self.simulation.step(self.steps)
-            
+
             # Save final state
             state = self.simulation.context.getState(
                 getPositions=True,
-                getVelocities=True, 
-                getForces=True, 
+                getVelocities=True,
+                getForces=True,
                 getEnergy=True,
                 enforcePeriodicBox=True
             )
-            
-            xml_path = os.path.join(segment_outdir, "seg.xml")
-            with open(xml_path, 'w') as f:
+
+            with open(os.path.join(segment_outdir, "seg.xml"), 'w') as f:
                 f.write(XmlSerializer.serialize(state))
-                
-            # Load trajectory with MDTraj for pcoord calculation
-            traj = mdtraj.load_dcd(dcd_path, top=os.path.join(segment_outdir, 'bstate.pdb'))
-            
-            # Convert to angstroms for TICA_PCoord
-            all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # Convert nm to Angstroms
-            
-            # Calculate progress coordinate
+
+            # Load trajectory using topology_path
+            traj = mdtraj.load_dcd(dcd_path, top=self.pdb.topology)
+
+            # Combine initial position with trajectory
+            all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # Angstroms
+
+            # Calculate and assign progress coordinate
             segment.pcoord = self.pcoord_calculator.calculate(all_positions)
             segment.status = Segment.SEG_STATUS_COMPLETE
             segment.walltime = time.time() - starttime
-            
+
         print(f"Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
         return segments
+
