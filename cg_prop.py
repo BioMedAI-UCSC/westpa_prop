@@ -120,7 +120,8 @@ class TestPropagator(WESTPropagator):
             # FIXME: Pay attention to what the intial state was
             bstate_mol = self.mol
             # print("bstate_mol.coords", bstate_mol.coords.shape)
-            return self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
+            state.pcoord = self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
+            return
         elif isinstance(state, InitialState):
             raise NotImplementedError
         raise NotImplementedError
