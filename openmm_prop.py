@@ -178,6 +178,7 @@ class OpenMMPropagator(WESTPropagator):
                 raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
 
             # Set up reporter
+            
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             self.simulation.reporters.clear()
             self.simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
@@ -197,7 +198,9 @@ class OpenMMPropagator(WESTPropagator):
                 f.write(XmlSerializer.serialize(state))
 
             # Load trajectory
-            traj = mdtraj.load_dcd(dcd_path, top=self.pdb.topology)
+            import mdtraj as md
+            md_top = md.Topology.from_openmm(self.pdb.topology)
+            traj = mdtraj.load_dcd(dcd_path, top=md_top)
             all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
             # Calculate progress coordinate
