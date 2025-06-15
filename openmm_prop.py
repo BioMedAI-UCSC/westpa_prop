@@ -5,8 +5,7 @@ from westpa.core.segment import Segment
 
 from openmm.app import PDBFile, ForceField, DCDReporter, Simulation
 from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer
-from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole
-
+from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole, atmospheres
 import mdtraj
 import numpy as np
 import time
@@ -21,92 +20,105 @@ class OpenMMPropagator(WESTPropagator):
     def __init__(self, rc=None):
         super(OpenMMPropagator, self).__init__(rc)
 
-
+        # Load paths
         cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path'])
-        #FIXME: It would be better to do this without modifying sys.path
-        if not cgschnet_path in sys.path:
+        generate_path = self.rc.config.require(['west', 'openmm', 'openmm_generate_path'])
+        if cgschnet_path not in sys.path:
             sys.path.append(cgschnet_path)
-        import simulate  #pyright: ignore[reportMissingImports]
+        if generate_path not in sys.path:
+            sys.path.append(generate_path)
 
+        import simulate
+        from module import function, preprocess, simulation
 
-        # Load configuration
-        topology_path = self.rc.config.require(['west', 'openmm', 'topology_path'])
-        # Expand environment variables in topology path
-        topology_path = os.path.expandvars(topology_path)
-        forcefield_files = self.rc.config.require(['west', 'openmm', 'forcefield'])
-        self.temperature = self.rc.config.get_typed(['west', 'openmm', 'temperature'], float, 300.0)
-        self.timestep = self.rc.config.get_typed(['west', 'openmm', 'timestep'], float, 2.0)
-        self.steps = self.rc.config.require(['west', 'openmm', 'steps'], int)
-        self.save_steps = self.rc.config.require(['west', 'openmm', 'save_steps'], int)
-        
-        print(f"Initializing OpenMMPropagator with:")
-        print(f"  topology_path: {topology_path}")
-        print(f"  forcefield_files: {forcefield_files}")
-        print(f"  temperature: {self.temperature}")
-        print(f"  timestep: {self.timestep}")
-        print(f"  steps: {self.steps}")
-        print(f"  save_steps: {self.save_steps}")
-        
-        # Initialize OpenMM objects
+        self.get_non_water_atom_indexes = function.get_non_water_atom_indexes
+        self.prepare_protein = preprocess.prepare_protein
+        self.run_openmm = simulation.run
+
+        # Load parameters
+        config = self.rc.config['west']['openmm']
+        self.temperature = float(config.get('temperature', 300.0))
+        self.timestep = float(config.get('timestep', 2.0))
+        self.friction = float(config.get('friction', 1.0))
+        self.pressure = float(config.get('pressure', 1.0))
+        self.barostatInterval = int(config.get('barostatInterval', 25))
+        self.constraintTolerance = float(config.get('constraintTolerance', 1e-6))
+        self.hydrogenMass = float(config.get('hydrogenMass', 1.5))
+        self.implicit_solvent = config.get('implicit_solvent', False)
+
+        self.steps = config['steps']
+        self.save_steps = config['save_steps']
+
+        # Topology and forcefield
+        topology_path = os.path.expandvars(config['topology_path'])
+        forcefield_files = config['forcefield']
         self.pdb = PDBFile(topology_path)
         self.forcefield = ForceField(*forcefield_files)
-        
-        # Create system with appropriate nonbonded method
+
+        # Create the system
         from openmm.app import NoCutoff, PME, HBonds
+        nonbondedMethod = NoCutoff if self.implicit_solvent else PME
+
         self.system = self.forcefield.createSystem(
             self.pdb.topology,
-            nonbondedMethod=NoCutoff,  # or PME, CutoffNonPeriodic
+            nonbondedMethod=nonbondedMethod,
             constraints=HBonds,
-            rigidWater=True
+            rigidWater=True,
+            hydrogenMass=self.hydrogenMass
         )
-        
-        # Create integrator
+
+        if not self.implicit_solvent:
+            from openmm import MonteCarloBarostat
+            self.system.addForce(MonteCarloBarostat(self.pressure * atmospheres,
+                                                    self.temperature * kelvin,
+                                                    self.barostatInterval))
+
+        # Integrator
+        from openmm import LangevinMiddleIntegrator
         self.integrator = LangevinMiddleIntegrator(
             self.temperature * kelvin,
-            1.0 / picosecond,
+            self.friction / picosecond,
             self.timestep * femtosecond
         )
-        
-        # Set up platform (CUDA/OpenCL for GPU)
+        self.integrator.setConstraintTolerance(self.constraintTolerance)
+
+        # Platform
         try:
             platform = Platform.getPlatformByName('CUDA')
-            properties = {'DeviceIndex': '0', 'Precision': 'mixed'}
+            platform_properties = {'Precision': 'mixed'}
         except Exception:
-            print("CUDA platform not available, falling back to CPU")
+            print("CUDA not available, using CPU.")
             platform = Platform.getPlatformByName('CPU')
-            properties = {}
-        
-        # Create simulation object
+            platform_properties = {}
+
+        # Simulation object
+        from openmm.app import Simulation
         self.simulation = Simulation(
-            self.pdb.topology, 
-            self.system, 
-            self.integrator,
-            platform, 
-            properties
+            self.pdb.topology, self.system, self.integrator,
+            platform, platform_properties
         )
-        
-        # Initialize pcoord calculator - using the same TICA_PCoord
-        pcoord_config = dict(self.rc.config['west', 'openmm', 'pcoord_calculator'])
-        pcoord_calculator_class_path = pcoord_config.pop("class")
-        pcoord_calculator_class = westpa.core.extloader.get_object(pcoord_calculator_class_path)
-        self.pcoord_calculator = pcoord_calculator_class(**pcoord_config)
 
-        self.checkpoint_path = self.rc.config.require(['west', 'openmm', 'model_path'])
-        checkpoint_path = self.checkpoint_path
-        if os.path.isdir(checkpoint_path):
-            checkpoint_path = os.path.join(checkpoint_path, "checkpoint-best.pth")
-        checkpoint_dir = os.path.dirname(checkpoint_path)
-        assert os.path.exists(checkpoint_path)
+        # Load model
+        self.checkpoint_path = os.path.expandvars(config['model_path'])
+        checkpoint_file = self.checkpoint_path
+        if os.path.isdir(checkpoint_file):
+            checkpoint_file = os.path.join(checkpoint_file, "checkpoint-best.pth")
+        assert os.path.exists(checkpoint_file)
+        prior_params_path = os.path.join(os.path.dirname(checkpoint_file), "prior_params.json")
+        prior_path = os.path.join(os.path.dirname(checkpoint_file), "priors.yaml")
 
-        prior_path = os.path.join(checkpoint_dir, "priors.yaml")
-        assert os.path.exists(prior_path)
-        prior_params_path = os.path.join(checkpoint_dir, "prior_params.json")
+        with open(prior_params_path, 'r') as f:
+            prior_params = json.load(f)
 
-        with open(f"{prior_params_path}", 'r') as file:
-            prior_params = json.load(file)
-    
-        self.mol, embeddings = simulate.load_molecule(prior_path, prior_params, topology_path, use_box=False, verbose=False)
+        self.mol, embeddings = simulate.load_molecule(
+            prior_path, prior_params, topology_path, use_box=False, verbose=False
+        )
 
+        # pcoord calculator
+        pcoord_config = dict(config['pcoord_calculator'])
+        class_path = pcoord_config.pop("class")
+        calculator_class = westpa.core.extloader.get_object(class_path)
+        self.pcoord_calculator = calculator_class(**pcoord_config)
 
     
     def get_pcoord(self, state):
@@ -124,6 +136,13 @@ class OpenMMPropagator(WESTPropagator):
         raise NotImplementedError
     
     def propagate(self, segments):
+        import os
+        import time
+        import numpy as np
+        import mdtraj
+        from openmm import XmlSerializer
+        from westpa.core.segment import Segment
+
         starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
 
@@ -131,33 +150,34 @@ class OpenMMPropagator(WESTPropagator):
             segment_outdir = os.path.expandvars(segment_pattern.format(segment=segment))
             os.makedirs(segment_outdir, exist_ok=True)
 
-            # NOTE: Removed basis state symlink
-            # os.symlink(...)  ← This line is now gone
-
-            # Set up initial positions and velocities
+            # Initialize state (positions/velocities)
             if segment.initpoint_type == Segment.SEG_INITPOINT_CONTINUES:
                 parent = Segment(n_iter=segment.n_iter - 1, seg_id=segment.parent_id)
                 parent_outdir = os.path.expandvars(segment_pattern.format(segment=parent))
-                try:
-                    with open(os.path.join(parent_outdir, "seg.xml"), 'r') as f:
-                        xml = f.read()
-                        self.simulation.context.setState(XmlSerializer.deserialize(xml))
-                    state = self.simulation.context.getState(getPositions=True)
-                    initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-                    initial_pos = np.array([initial_pos])
-                except Exception as e:
-                    print(f"Error loading parent state: {e}")
-                    raise
+                state_file = os.path.join(parent_outdir, "seg.xml")
 
-            elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-                # Start from topology PDB directly
-                self.simulation.context.setPositions(self.pdb.positions)
-                self.simulation.context.setVelocitiesToTemperature(self.temperature * kelvin)
+                print(f"Loading parent state from {state_file}")
+                with open(state_file, 'r') as f:
+                    xml = f.read()
+                    self.simulation.context.setState(XmlSerializer.deserialize(xml))
+
                 state = self.simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
 
-            # Use topology file directly for MDTraj
+            elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
+                print("Initializing from topology (new trajectory)")
+                self.simulation.context.setPositions(self.pdb.positions)
+                self.simulation.minimizeEnergy()
+                self.simulation.context.setVelocitiesToTemperature(self.temperature)
+                state = self.simulation.context.getState(getPositions=True)
+                initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+                initial_pos = np.array([initial_pos])
+
+            else:
+                raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
+
+            # Set up reporter
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             self.simulation.reporters.clear()
             self.simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
@@ -173,17 +193,14 @@ class OpenMMPropagator(WESTPropagator):
                 getEnergy=True,
                 enforcePeriodicBox=True
             )
-
             with open(os.path.join(segment_outdir, "seg.xml"), 'w') as f:
                 f.write(XmlSerializer.serialize(state))
 
-            # Load trajectory using topology_path
+            # Load trajectory
             traj = mdtraj.load_dcd(dcd_path, top=self.pdb.topology)
+            all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
-            # Combine initial position with trajectory
-            all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # Angstroms
-
-            # Calculate and assign progress coordinate
+            # Calculate progress coordinate
             segment.pcoord = self.pcoord_calculator.calculate(all_positions)
             segment.status = Segment.SEG_STATUS_COMPLETE
             segment.walltime = time.time() - starttime
