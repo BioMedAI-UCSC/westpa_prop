@@ -19,21 +19,12 @@ from cg_prop import TICA_PCoord
 class OpenMMPropagator(WESTPropagator):
     def __init__(self, rc=None):
         super(OpenMMPropagator, self).__init__(rc)
-
-        # Load paths
-        cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path'])
-        generate_path = self.rc.config.require(['west', 'openmm', 'openmm_generate_path'])
-        if cgschnet_path not in sys.path:
-            sys.path.append(cgschnet_path)
-        if generate_path not in sys.path:
-            sys.path.append(generate_path)
-
+        cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path']) 
+        
+        if cgschnet_path not in sys.path: 
+            sys.path.append(cgschnet_path) 
+          
         import simulate
-        from module import function, preprocess, simulation
-
-        self.get_non_water_atom_indexes = function.get_non_water_atom_indexes
-        self.prepare_protein = preprocess.prepare_protein
-        self.run_openmm = simulation.run
 
         # Load parameters
         config = self.rc.config['west']['openmm']
@@ -98,43 +89,28 @@ class OpenMMPropagator(WESTPropagator):
             platform, platform_properties
         )
 
-        # Load model
-        self.checkpoint_path = os.path.expandvars(config['model_path'])
-        checkpoint_file = self.checkpoint_path
-        if os.path.isdir(checkpoint_file):
-            checkpoint_file = os.path.join(checkpoint_file, "checkpoint-best.pth")
-        assert os.path.exists(checkpoint_file)
-        prior_params_path = os.path.join(os.path.dirname(checkpoint_file), "prior_params.json")
-        prior_path = os.path.join(os.path.dirname(checkpoint_file), "priors.yaml")
-
-        with open(prior_params_path, 'r') as f:
-            prior_params = json.load(f)
-
-        self.mol, embeddings = simulate.load_molecule(
-            prior_path, prior_params, topology_path, use_box=False, verbose=False
-        )
-
         # pcoord calculator
         pcoord_config = dict(config['pcoord_calculator'])
         class_path = pcoord_config.pop("class")
         calculator_class = westpa.core.extloader.get_object(class_path)
         self.pcoord_calculator = calculator_class(**pcoord_config)
 
-    
     def get_pcoord(self, state):
-        # Handle basis states
+        import numpy as np
+
         if isinstance(state, BasisState):
-            # print("state.auxref", state.auxref)
-            # FIXME: Pay attention to what the intial state was
-            bstate_mol = self.mol
-            # print("bstate_mol.coords", bstate_mol.coords.shape)
-            state.pcoord = self.pcoord_calculator.calculate(np.transpose(bstate_mol.coords, (2, 0, 1)))
+            # Load initial structure (topology)
+            ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
+            positions = self.pdb.positions
+            ca_positions = np.array([positions[i].value_in_unit(nanometer) for i in ca_indices])
+            ca_positions = ca_positions[np.newaxis, :, :] * 10.0  # shape (1, N, 3) in Å
+            state.pcoord = self.pcoord_calculator.calculate(ca_positions)
             return
+
         elif isinstance(state, InitialState):
             raise NotImplementedError
-            
-        raise NotImplementedError
-    
+
+        raise NotImplementedError    
     def propagate(self, segments):
         import os
         import time
