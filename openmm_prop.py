@@ -203,11 +203,12 @@ class OpenMMPropagator(WESTPropagator):
             traj = mdtraj.load_dcd(dcd_path, top=md_top)
             all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
-            # Calculate progress coordinate
-            segment.pcoord = self.pcoord_calculator.calculate(all_positions)
+            # Select Cα atoms to match TICA training
+            ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
+            ca_positions = all_positions[:, ca_indices, :]
+            segment.pcoord = self.pcoord_calculator.calculate(ca_positions)
             segment.status = Segment.SEG_STATUS_COMPLETE
             segment.walltime = time.time() - starttime
 
         print(f"Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
         return segments
-
