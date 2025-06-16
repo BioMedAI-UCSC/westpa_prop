@@ -6,12 +6,15 @@ from westpa.core.segment import Segment
 from openmm.app import PDBFile, ForceField, DCDReporter, Simulation, NoCutoff, PME, HBonds
 from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer, MonteCarloBarostat
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole, atmospheres
+
+
 import mdtraj
 import numpy as np
 import time
 import os
 import sys
 import json
+import random
 
 # Import TICA_PCoord from your existing file
 from cg_prop import TICA_PCoord
@@ -74,7 +77,8 @@ class OpenMMPropagator(WESTPropagator):
     def _create_simulation(self):
         try:
             platform = Platform.getPlatformByName('CUDA')
-            platform_properties = {'Precision': 'mixed'}
+            platform_properties = {'Precision': 'single'} 
+            # platform_properties = {'Precision': 'mixed'}
         except Exception:
             print("CUDA not available, using CPU.")
             platform = Platform.getPlatformByName('CPU')
@@ -101,6 +105,9 @@ class OpenMMPropagator(WESTPropagator):
             self.timestep * femtosecond
         )
         integrator.setConstraintTolerance(self.constraintTolerance)
+        
+        seed = random.randint(1, 1000000)
+        integrator.setRandomNumberSeed(seed)
 
         sim = Simulation(self.pdb.topology, system, integrator, platform, platform_properties)
         return sim
@@ -145,7 +152,29 @@ class OpenMMPropagator(WESTPropagator):
             simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
 
             print(f"Running {self.steps} steps for segment {segment.seg_id}")
-            simulation.step(self.steps)
+
+            times = []
+            forces = []
+            energy_k = []
+            energy_u = []
+
+            assert self.steps % self.save_steps == 0, "total_steps must be divisible by report_steps"
+
+            cur_steps = 0
+            for i in range(self.steps//self.save_steps):
+                simulation.step(self.save_steps)
+                state = simulation.context.getState(getPositions=True, getForces=True, getEnergy=True)
+                forces.append(state.getForces(asNumpy=True).value_in_unit(kilojoule_per_mole/nanometer))
+                times.append(state.getTime().value_in_unit(picosecond))
+                energy_k.append(state.getKineticEnergy().value_in_unit(kilojoule_per_mole))
+                energy_u.append(state.getPotentialEnergy().value_in_unit(kilojoule_per_mole))
+
+            times = np.array(times)
+            forces = np.array(forces)
+            energy_k = np.array(energy_k)
+            energy_u = np.array(energy_u)
+            np.savez(os.path.join(segment_outdir, 'seg.npz'), times=times, forces=forces, energy_k=energy_k, energy_u=energy_u)
+
 
             # Save final state
             state = simulation.context.getState(
