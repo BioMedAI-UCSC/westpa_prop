@@ -6,6 +6,7 @@ from westpa.core.segment import Segment
 from openmm.app import PDBFile, ForceField, DCDReporter, Simulation, NoCutoff, PME, HBonds
 from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer, MonteCarloBarostat
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole, atmospheres
+from threading import Lock
 
 
 import mdtraj
@@ -43,6 +44,18 @@ class OpenMMPropagator(WESTPropagator):
         self.steps = config['steps']
         self.save_steps = config['save_steps']
 
+
+        try:
+            platform = Platform.getPlatformByName('CUDA')
+            self.num_gpus = int(config.get('num_gpus', 1))
+            if self.num_gpus == -1:
+                self.num_gpus = platform.getPropertyDefaultValue('CudaDeviceIndex').count(',') + 1 if ',' in platform.getPropertyDefaultValue('CudaDeviceIndex') else 1
+        except Exception:
+            self.num_gpus = 1
+
+        self.gpu_precision = config.get('gpu_precision', 'single')
+
+
         # Topology and forcefield
         topology_path = os.path.expandvars(config['topology_path'])
         forcefield_files = config['forcefield']
@@ -74,11 +87,19 @@ class OpenMMPropagator(WESTPropagator):
 
         raise NotImplementedError    
 
-    def _create_simulation(self):
+
+    def _get_next_gpu_index(self, segment_id):
+        return segment_id % self.num_gpus
+
+    def _create_simulation(self, seg_id):
         try:
             platform = Platform.getPlatformByName('CUDA')
-            platform_properties = {'Precision': 'single'} 
-            # platform_properties = {'Precision': 'mixed'}
+            gpu_index = self._get_next_gpu_index(seg_id)
+            print(f"Using gpu {gpu_index}")
+            platform_properties = {
+                'CudaDeviceIndex': str(gpu_index),
+                'Precision': self.gpu_precision 
+            }
         except Exception:
             print("CUDA not available, using CPU.")
             platform = Platform.getPlatformByName('CPU')
@@ -115,7 +136,7 @@ class OpenMMPropagator(WESTPropagator):
     def propagate(self, segments):
         starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
-        simulation = self._create_simulation()
+        simulation = self._create_simulation(segments[0].seg_id)
 
         for segment in segments:
             segment_outdir = os.path.expandvars(segment_pattern.format(segment=segment))
