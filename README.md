@@ -29,8 +29,7 @@ pip install openmm mdtraj
 ## Setting Up Your System
 
 ### Basis States
-1. For CGSchNet: Configure basis states in `bstates/bstates.txt`
-2. For OpenMM: Provide a properly formatted PDB file at `bstates/bstate.pdb`
+Configure basis states in the config topology in the west.cfg 
 
 ### TICA Model
 Ensure your TICA model is properly configured in your configuration files or set the environment variable:
@@ -46,7 +45,7 @@ export TICA_MODEL_PATH="/media/DATA_18_TB_1/andy/benchmark_cache/chignolin_300K.
 
 ### Using CGSchNet (Default)
 ```bash
-w_init --bstate-file bstates/bstates.txt && w_run
+w_init -r west_cg.cfg --bstate-file bstates/bstates.txt && w_run
 ```
 
 ### Using OpenMM
@@ -58,15 +57,20 @@ w_init -r west_openmm.cfg --bstate-file bstates/bstates.txt
 w_run -r west_openmm.cfg
 ```
 
+### Run in Parallel
+```
+w_run -r west_openmm.cfg --work-manager processes --n-workers $NUM_WORKERS
+```
+
 ## Configuration Files
 
-- `west.cfg` - Configuration for CGSchNet-based simulations
+- `west_cg.cfg` - Configuration for CGSchNet-based simulations
 - `west_openmm.cfg` - Configuration for OpenMM-based simulations
 
 ## Customizing Your Simulations
 
 ### CGSchNet Configuration
-Edit the `west.cfg` file to modify parameters in the `cg_prop` section.
+Edit the `west_cg.cfg` file to modify parameters in the `cg_prop` section.
 
 ### OpenMM Configuration
 Edit the `west_openmm.cfg` file to modify:
