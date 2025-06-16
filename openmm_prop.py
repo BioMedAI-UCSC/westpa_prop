@@ -106,15 +106,9 @@ class OpenMMPropagator(WESTPropagator):
         return sim
 
     def propagate(self, segments):
-        import os
-        import time
-        import numpy as np
-        import mdtraj
-        from openmm import XmlSerializer
-        from westpa.core.segment import Segment
-
         starttime = time.time()
         segment_pattern = self.rc.config['west', 'data', 'data_refs', 'segment']
+        simulation = self._create_simulation()
 
         for segment in segments:
             segment_outdir = os.path.expandvars(segment_pattern.format(segment=segment))
@@ -129,17 +123,17 @@ class OpenMMPropagator(WESTPropagator):
                 print(f"Loading parent state from {state_file}")
                 with open(state_file, 'r') as f:
                     xml = f.read()
-                    self.simulation.context.setState(XmlSerializer.deserialize(xml))
+                    simulation.context.setState(XmlSerializer.deserialize(xml))
 
-                state = self.simulation.context.getState(getPositions=True)
+                state = simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
             elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
                 print(f"Initializing new trajectory {segment.seg_id}")
-                self.simulation.context.setPositions(self.pdb.positions)
-                self.simulation.minimizeEnergy()
-                self.simulation.context.setVelocitiesToTemperature(self.temperature)
-                state = self.simulation.context.getState(getPositions=True)
+                simulation.context.setPositions(self.pdb.positions)
+                simulation.minimizeEnergy()
+                simulation.context.setVelocitiesToTemperature(self.temperature)
+                state = simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
             else:
@@ -147,14 +141,14 @@ class OpenMMPropagator(WESTPropagator):
 
             
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
-            self.simulation.reporters.clear()
-            self.simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
+            simulation.reporters.clear()
+            simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
 
             print(f"Running {self.steps} steps for segment {segment.seg_id}")
-            self.simulation.step(self.steps)
+            simulation.step(self.steps)
 
             # Save final state
-            state = self.simulation.context.getState(
+            state = simulation.context.getState(
                 getPositions=True,
                 getVelocities=True,
                 getForces=True,
