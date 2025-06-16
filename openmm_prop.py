@@ -3,8 +3,8 @@ from westpa.core.propagators import WESTPropagator
 from westpa.core.states import BasisState, InitialState
 from westpa.core.segment import Segment
 
-from openmm.app import PDBFile, ForceField, DCDReporter, Simulation
-from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer
+from openmm.app import PDBFile, ForceField, DCDReporter, Simulation, NoCutoff, PME, HBonds
+from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer, MonteCarloBarostat
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole, atmospheres
 import mdtraj
 import numpy as np
@@ -47,47 +47,7 @@ class OpenMMPropagator(WESTPropagator):
         self.forcefield = ForceField(*forcefield_files)
 
         # Create the system
-        from openmm.app import NoCutoff, PME, HBonds
-        nonbondedMethod = NoCutoff if self.implicit_solvent else PME
-
-        self.system = self.forcefield.createSystem(
-            self.pdb.topology,
-            nonbondedMethod=nonbondedMethod,
-            constraints=HBonds,
-            rigidWater=True,
-            hydrogenMass=self.hydrogenMass
-        )
-
-        if not self.implicit_solvent:
-            from openmm import MonteCarloBarostat
-            self.system.addForce(MonteCarloBarostat(self.pressure * atmospheres,
-                                                    self.temperature * kelvin,
-                                                    self.barostatInterval))
-
-        # Integrator
-        from openmm import LangevinMiddleIntegrator
-        self.integrator = LangevinMiddleIntegrator(
-            self.temperature * kelvin,
-            self.friction / picosecond,
-            self.timestep * femtosecond
-        )
-        self.integrator.setConstraintTolerance(self.constraintTolerance)
-
-        # Platform
-        try:
-            platform = Platform.getPlatformByName('CUDA')
-            platform_properties = {'Precision': 'mixed'}
-        except Exception:
-            print("CUDA not available, using CPU.")
-            platform = Platform.getPlatformByName('CPU')
-            platform_properties = {}
-
-        # Simulation object
-        from openmm.app import Simulation
-        self.simulation = Simulation(
-            self.pdb.topology, self.system, self.integrator,
-            platform, platform_properties
-        )
+        self.nonbondedMethod = NoCutoff if self.implicit_solvent else PME
 
         # pcoord calculator
         pcoord_config = dict(config['pcoord_calculator'])
@@ -96,7 +56,6 @@ class OpenMMPropagator(WESTPropagator):
         self.pcoord_calculator = calculator_class(**pcoord_config)
 
     def get_pcoord(self, state):
-        import numpy as np
 
         if isinstance(state, BasisState):
             # Load initial structure (topology)
@@ -111,6 +70,41 @@ class OpenMMPropagator(WESTPropagator):
             raise NotImplementedError
 
         raise NotImplementedError    
+
+    def _create_simulation(self):
+        try:
+            platform = Platform.getPlatformByName('CUDA')
+            platform_properties = {'Precision': 'mixed'}
+        except Exception:
+            print("CUDA not available, using CPU.")
+            platform = Platform.getPlatformByName('CPU')
+            platform_properties = {}
+
+        system = self.forcefield.createSystem(
+            self.pdb.topology,
+            nonbondedMethod=self.nonbondedMethod,
+            constraints=HBonds,
+            rigidWater=True,
+            hydrogenMass=self.hydrogenMass
+        )
+
+        if not self.implicit_solvent:
+            system.addForce(MonteCarloBarostat(self.pressure * atmospheres,
+                                                    self.temperature * kelvin,
+                                                    self.barostatInterval))
+
+
+
+        integrator = LangevinMiddleIntegrator(
+            self.temperature * kelvin,
+            self.friction / picosecond,
+            self.timestep * femtosecond
+        )
+        integrator.setConstraintTolerance(self.constraintTolerance)
+
+        sim = Simulation(self.pdb.topology, system, integrator, platform, platform_properties)
+        return sim
+
     def propagate(self, segments):
         import os
         import time
@@ -140,20 +134,17 @@ class OpenMMPropagator(WESTPropagator):
                 state = self.simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
-
             elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-                print("Initializing from topology (new trajectory)")
+                print(f"Initializing new trajectory {segment.seg_id}")
                 self.simulation.context.setPositions(self.pdb.positions)
                 self.simulation.minimizeEnergy()
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
                 state = self.simulation.context.getState(getPositions=True)
                 initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
-
             else:
                 raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
 
-            # Set up reporter
             
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             self.simulation.reporters.clear()
@@ -174,8 +165,7 @@ class OpenMMPropagator(WESTPropagator):
                 f.write(XmlSerializer.serialize(state))
 
             # Load trajectory
-            import mdtraj as md
-            md_top = md.Topology.from_openmm(self.pdb.topology)
+            md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
             traj = mdtraj.load_dcd(dcd_path, top=md_top)
             all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
