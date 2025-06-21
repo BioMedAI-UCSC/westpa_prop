@@ -77,3 +77,81 @@ Edit the `west_openmm.cfg` file to modify:
 - Force fields in the `forcefield` list
 - Temperature, timestep, and other simulation parameters
 - Progress coordinate calculation
+
+
+Here’s a revised and detailed section to add to your `README.md`, specifically for running **OpenMM-based WESTPA simulations on Delta**:
+
+---
+
+## Running on Delta (OpenMM Only)
+
+To run WESTPA simulations using the OpenMM propagator on [Delta](https://docs.delta.ncsa.illinois.edu/), follow these steps:
+
+### 1. Clone the Repository
+
+Clone this repository directly onto Delta (e.g., in your `/home` or project directory):
+
+### 2. Configure `west_openmm.cfg`
+
+Update the `west_openmm.cfg` file with the correct paths to your:
+
+* **Topology and coordinate files**
+* **Basis state files**
+* **TICA model path**
+
+Make sure all paths reflect the Delta filesystem (e.g., `/scratch`, `/work/hdd`, or `/projects`).
+
+### 3. Use `/work/hdd` for `traj_segs`
+
+Output data such as `traj_segs` should be written to `/work/hdd` (a high-throughput scratch filesystem on Delta).
+This is **automatically set** by the Slurm script (`run_delta.slurm`), but double-check that all file paths point to `/work/hdd` or another performance-optimized location.
+
+### 4. Edit `env_mpi.sh`
+
+Modify the `env_mpi.sh` script to your account details.
+
+### 5. Configure `run_delta.slurm`
+
+This Slurm submission script launches your WESTPA job across GPU nodes. Adjust the following parameters:
+
+```bash
+#SBATCH -A bbpa-delta-gpu           # Allocation/project name (use your group's project code)
+#SBATCH --partition=gpuA40x4        # GPU partition on Delta
+#SBATCH -t 38:00:00                 # Wall time (HH:MM:SS)
+#SBATCH --cpus-per-task=2           # Number of CPU threads per task (match OMP_NUM_THREADS)
+#SBATCH -N 45                       # Total number of nodes to use
+#SBATCH --ntasks-per-node=4         # Number of MPI tasks per node (use 1 per GPU)
+#SBATCH --gpus-per-task=1           # GPUs per task
+#SBATCH --gpus-per-node=4           # Total GPUs per node
+#SBATCH --job-name=westpadeltabba   # Job name
+#SBATCH --output=slurm.out          # Output log file
+#SBATCH --mail-user=awaghili@ucsc.edu # Email for notifications
+```
+
+### 6. Initialize the Simulation
+
+Run the initialization command with your OpenMM config:
+
+```bash
+w_init -r west_openmm.cfg --bstate-file bstates/bstates.txt
+```
+
+### 7. Submit the Job
+
+Submit the simulation using Slurm:
+
+```bash
+sbatch run_delta.slurm
+```
+
+### 8. Monitor the Job
+
+Use standard Slurm tools to check status:
+
+```bash
+squeue -u $USER
+scontrol show job <JOBID>
+```
+
+---
+
