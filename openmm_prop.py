@@ -60,6 +60,7 @@ class OpenMMPropagator(WESTPropagator):
         topology_path = os.path.expandvars(config['topology_path'])
         forcefield_files = config['forcefield']
         self.pdb = PDBFile(topology_path)
+        self.atom_slice = [a.index for a in self.pdb.getTopology().atoms() if a.residue.name != "HOH"]
         self.forcefield = ForceField(*forcefield_files)
 
         # Create the system
@@ -154,7 +155,7 @@ class OpenMMPropagator(WESTPropagator):
                     simulation.context.setState(XmlSerializer.deserialize(xml))
 
                 state = simulation.context.getState(getPositions=True)
-                initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+                initial_pos = state.getPositions(asNumpy=True)[self.atom_slice].value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
             elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
                 print(f"Initializing new trajectory {segment.seg_id}")
@@ -162,7 +163,7 @@ class OpenMMPropagator(WESTPropagator):
                 simulation.minimizeEnergy()
                 simulation.context.setVelocitiesToTemperature(self.temperature)
                 state = simulation.context.getState(getPositions=True)
-                initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+                initial_pos = state.getPositions(asNumpy=True)[self.atom_slice].value_in_unit(nanometer)
                 initial_pos = np.array([initial_pos])
             else:
                 raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
@@ -170,7 +171,7 @@ class OpenMMPropagator(WESTPropagator):
             
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             simulation.reporters.clear()
-            simulation.reporters.append(DCDReporter(dcd_path, self.save_steps))
+            simulation.reporters.append(mdtraj.reporters.DCDReporter(dcd_path, self.save_steps, self.atom_slice))
 
             print(f"Running {self.steps} steps for segment {segment.seg_id}")
 
@@ -185,7 +186,7 @@ class OpenMMPropagator(WESTPropagator):
             for i in range(self.steps//self.save_steps):
                 simulation.step(self.save_steps)
                 state = simulation.context.getState(getPositions=True, getForces=True, getEnergy=True)
-                forces.append(state.getForces(asNumpy=True).value_in_unit(kilojoule_per_mole/nanometer))
+                forces.append(state.getForces(asNumpy=True)[self.atom_slice].value_in_unit(kilojoule_per_mole/nanometer))
                 times.append(state.getTime().value_in_unit(picosecond))
                 energy_k.append(state.getKineticEnergy().value_in_unit(kilojoule_per_mole))
                 energy_u.append(state.getPotentialEnergy().value_in_unit(kilojoule_per_mole))
@@ -209,7 +210,7 @@ class OpenMMPropagator(WESTPropagator):
                 f.write(XmlSerializer.serialize(state))
 
             # Load trajectory
-            md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
+            md_top = mdtraj.Topology.from_openmm(self.pdb.topology).subset(self.atom_slice)
             traj = mdtraj.load_dcd(dcd_path, top=md_top)
             all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
