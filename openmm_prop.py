@@ -3,18 +3,20 @@ from westpa.core.propagators import WESTPropagator
 from westpa.core.states import BasisState, InitialState
 from westpa.core.segment import Segment
 
-from openmm.app import PDBFile, ForceField, DCDReporter, Simulation, NoCutoff, PME, HBonds
+from openmm.app import PDBFile, ForceField, DCDReporter, Simulation, NoCutoff, PME, HBonds, Topology, Modeller
 from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer, MonteCarloBarostat
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole, atmospheres
 from threading import Lock
+import pdbfixer
 
-
+from datetime import datetime
 import mdtraj
 import numpy as np
 import time
 import os
 import sys
 import json
+import math
 import random
 
 # Import TICA_PCoord from your existing file
@@ -41,6 +43,12 @@ class OpenMMPropagator(WESTPropagator):
         self.hydrogenMass = float(config.get('hydrogenMass', 1.5))
         self.implicit_solvent = config.get('implicit_solvent', False)
 
+        if self.implicit_solvent:
+            self.saltCon = 0.15 # unit.molar
+            self.solventDielectric = 78.5 # Default solvent dielectric: http://docs.openmm.org/latest/userguide/application/02_running_sims.html @ 2024.02.11
+            self.implicitSolventKappa = 7.3*50.33355*math.sqrt(self.saltCon/self.solventDielectric/self.temperature)*(1/nanometer)
+
+
         self.steps = config['steps']
         self.save_steps = config['save_steps']
 
@@ -61,6 +69,52 @@ class OpenMMPropagator(WESTPropagator):
         forcefield_files = config['forcefield']
         self.pdb = PDBFile(topology_path)
         self.forcefield = ForceField(*forcefield_files)
+
+        fixer = pdbfixer.PDBFixer(topology_path)
+
+        # find missing residues and atoms
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        print(f"Missing residues: {fixer.missingResidues}")
+        print(f"Missing terminals: {fixer.missingTerminals}")
+        print(f"Missing atoms: {fixer.missingAtoms}")
+
+        # remove missing residues at the terminal
+        chains = list(fixer.topology.chains())
+        keys = fixer.missingResidues.keys()
+        for key in list(keys):
+            chain = chains[key[0]]
+            # terminal residues
+            if key[1] == 0 or key[1] == len(list(chain.residues())):
+                del fixer.missingResidues[key]
+
+        # check if the terminal residues are removed
+        for key in list(keys):
+            chain = chains[key[0]]
+            assert key[1] != 0 or key[1] != len(list(chain.residues())), "Terminal residues are not removed."
+
+        # find nonstandard residues
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+
+        # add missing atoms, residues, and terminals
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+
+        # add missing hydrogens
+        ph = 7.0
+        fixer.addMissingHydrogens(ph)
+
+        # make modeller
+        modeller = Modeller(fixer.topology, fixer.positions)
+
+        if self.implicit_solvent:
+            modeller.deleteWater()
+            ions_to_delete = [res for res in modeller.topology.residues() if res.name in ('NA', 'CL')]
+            modeller.delete(ions_to_delete)
+
+        self.pdb.topology = modeller.getTopology()
+        self.pdb.positions = modeller.getPositions()
 
         # Create the system
         self.nonbondedMethod = NoCutoff if self.implicit_solvent else PME
@@ -105,13 +159,16 @@ class OpenMMPropagator(WESTPropagator):
             platform = Platform.getPlatformByName('CPU')
             platform_properties = {}
 
-        system = self.forcefield.createSystem(
-            self.pdb.topology,
-            nonbondedMethod=self.nonbondedMethod,
-            constraints=HBonds,
-            rigidWater=True,
-            hydrogenMass=self.hydrogenMass
-        )
+        if self.implicit_solvent:
+            system = self.forcefield.createSystem(self.pdb.topology, nonbondedMethod=self.nonbondedMethod, constraints=HBonds, hydrogenMass=self.hydrogenMass, implicitSolventKappa=self.implicitSolventKappa)
+        else:
+            system = self.forcefield.createSystem(
+                self.pdb.topology,
+                nonbondedMethod=self.nonbondedMethod,
+                constraints=HBonds,
+                rigidWater=True,
+                hydrogenMass=self.hydrogenMass
+            )
 
         if not self.implicit_solvent:
             system.addForce(MonteCarloBarostat(self.pressure * atmospheres,
@@ -140,7 +197,13 @@ class OpenMMPropagator(WESTPropagator):
 
         for segment in segments:
             segment_outdir = os.path.expandvars(segment_pattern.format(segment=segment))
-            os.makedirs(segment_outdir, exist_ok=True)
+            make_dir = False
+            while not make_dir:
+                try:
+                    os.makedirs(segment_outdir, exist_ok=True)
+                    make_dir = True
+                except:
+                    make_dir = False
 
             # Initialize state (positions/velocities)
             if segment.initpoint_type == Segment.SEG_INITPOINT_CONTINUES:
@@ -220,5 +283,7 @@ class OpenMMPropagator(WESTPropagator):
             segment.status = Segment.SEG_STATUS_COMPLETE
             segment.walltime = time.time() - starttime
 
-        print(f"Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
+        current_time = datetime.now().strftime("%H:%M:%S")
+        print(f"{current_time}: Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
         return segments
+
