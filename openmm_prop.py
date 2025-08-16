@@ -19,17 +19,49 @@ import json
 import math
 import random
 
-# Import TICA_PCoord from your existing file
-from cg_prop import TICA_PCoord
+# Import TICA_PCoord from your existing file 
+# from cg_prop import TICA_PCoord
+
+#We are using the RMSD Propagator from get_distance.py file calculations
+class RMSDPropagator(WESTPropagator):
+    def propagate(self, segment: Segment):
+        seg_dir = segment.data_ref
+        os.makedirs(seg_dir, exist_ok=True)
+        os.chdir(seg_dir)
+
+        # Link parent.xml based on init type
+        if segment.initpoint_type == "SEG_INITPOINT_CONTINUES":
+            os.symlink(os.path.join(segment.parent_data_ref, "seg.xml"), "parent.xml")
+        else:
+            os.symlink(segment.parent_data_ref, "parent.xml")
+
+        # Step 1: Run dynamics with OpenMM
+        subprocess.run([
+            "python",
+            os.path.join(self.sim_root, "common_files", "protein_prod.py")
+        ], check=True)
+
+        # Step 2: Compute RMSD using your get_distance.py
+        subprocess.run([
+            "python",
+            os.path.join(self.sim_root, "common_files", "get_distance.py")
+        ], check=True)
+
+        # Step 3: Save RMSD to WESTPA
+        with open("dist.dat") as f:
+            rmsd_value = float(f.readline().strip())
+        segment.pcoord = [rmsd_value]
 
 class OpenMMPropagator(WESTPropagator):
     def __init__(self, rc=None):
         super(OpenMMPropagator, self).__init__(rc)
-        cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path']) 
+
+        # No CGSchnet yet
+        # cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path']) 
         
-        if cgschnet_path not in sys.path: 
-            sys.path.append(cgschnet_path) 
-          
+        # if cgschnet_path not in sys.path: 
+        #     sys.path.append(cgschnet_path) 
+        
         import simulate
 
         # Load parameters
@@ -119,22 +151,62 @@ class OpenMMPropagator(WESTPropagator):
         # Create the system
         self.nonbondedMethod = NoCutoff if self.implicit_solvent else PME
 
-        # pcoord calculator
-        pcoord_config = dict(config['pcoord_calculator'])
-        class_path = pcoord_config.pop("class")
-        calculator_class = westpa.core.extloader.get_object(class_path)
-        self.pcoord_calculator = calculator_class(**pcoord_config)
+        # pcoord calculator for TICA
+        # pcoord_config = dict(config['pcoord_calculator']) #loading TICA knobs in the WESTPA config, under pcoord_calculator
+        # class_path = pcoord_config.pop("class") #Grabbing whatever is stored in the class
+        # calculator_class = westpa.core.extloader.get_object(class_path) 
+        # self.pcoord_calculator = calculator_class(**pcoord_config)
+
+        #RMSD configuration and reference prep
+    #Config knobs: reference_pdb and rmsd_selection
+        self.reference_pdb = os.path.expandvars(config.get('reference_pdb', config['topology_path']))
+            #looks in west.cfg under [west][openmm] for a key called reference_pdb. If missing, it will fall back to config['topology_path'] the intial structure PDB
+            #os.path.expandvars(...) lets you use the $WEST_SIM_ROOT or other environment variables in the path 
+
+        #DNA safe default: phosphorus atoms; override via config if you like
+        self.rmsd_selection = config.get('rmsd_selection', "name P")
+            #this is safe for DNA backbone. 
+            #User can override this in the config file, e.g. backbone or name CA
+
+        #Build mdtraj topologies anad selectoin
+        self.md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
+        #Converts the OpenMM topology you already loaded into a MDTraj Topology so we can  use MDTraj's RMSD functions
+        #self.pdb was already created earlier in __init__ form your topology file 
+
+        #Load reference: mdtraj auto-detects PDB/DCD/etc.
+        self.ref_traj = mdtraj.load(self.reference_pdb) #reference structure as MDTraj object. If .pdb it loads a single frame, if .dcd it loads a trajectory
+        self.sel_idx = self.md_top.select(self.rmsd_selection)
+        #Creates an integer array of atoms indices from the simulation topology matching the selection string
+            #Which atoms in the array are phosphorus P, may be [4, 10, 16, ...] 
+
+        #Slice reference to selected atoms to match RMSD selection
+        self.ref_traj = self.ref_traj.atom_slice(self.sel_idx)
+        #Modifies the reference so it only contains the selected atoms
+        #This ensures that when we compute RMSD later, the 
+        #atom order and count match exactly between simulation frames and reference 
 
     def get_pcoord(self, state):
 
+        # if isinstance(state, BasisState):
+        #     # Load initial structure (topology)
+        #     ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
+        #     positions = self.pdb.positions
+        #     ca_positions = np.array([positions[i].value_in_unit(nanometer) for i in ca_indices])
+        #     ca_positions = ca_positions[np.newaxis, :, :] * 10.0  # shape (1, N, 3) in Å
+        #     state.pcoord = self.pcoord_calculator.calculate(ca_positions)
+        #     return
+
         if isinstance(state, BasisState):
-            # Load initial structure (topology)
-            ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
-            positions = self.pdb.positions
-            ca_positions = np.array([positions[i].value_in_unit(nanometer) for i in ca_indices])
-            ca_positions = ca_positions[np.newaxis, :, :] * 10.0  # shape (1, N, 3) in Å
-            state.pcoord = self.pcoord_calculator.calculate(ca_positions)
-            return
+            # Convert OpenMM units -> nm numpy array, shape (1, n_atoms, 3)
+            pos_nm = np.array([[v.value_in_unit(nanometer) for v in self.pdb.position]], dtype=float)
+            init_traj = mdtraj.Trajectory(xyz=pos_nm, topology=self.md_top)
+            init_self = init_traj.atom_slice(self.sel_idx)
+            ref_sel = self.ref_traj #already sliced 
+
+            #RMSD vs reference frame 0; returns shape (1,)
+            rmsd0 = mdtraj.rmsd(init_sel, ref_sel, frame=0)
+            state.pcoord = rmsd0.reshape(-1, 1)
+            return 
 
         elif isinstance(state, InitialState):
             raise NotImplementedError
@@ -210,6 +282,9 @@ class OpenMMPropagator(WESTPropagator):
                 parent = Segment(n_iter=segment.n_iter - 1, seg_id=segment.parent_id)
                 parent_outdir = os.path.expandvars(segment_pattern.format(segment=parent))
                 state_file = os.path.join(parent_outdir, "seg.xml")
+                if not os.path.isfile(state_file):
+                    print(f"Missing segment state file: {state_file}")
+                    continue
 
                 print(f"Loading parent state from {state_file}")
                 with open(state_file, 'r') as f:
@@ -272,18 +347,56 @@ class OpenMMPropagator(WESTPropagator):
                 f.write(XmlSerializer.serialize(state))
 
             # Load trajectory
-            md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
-            traj = mdtraj.load_dcd(dcd_path, top=md_top)
-            all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
+            # md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
+            # traj = mdtraj.load_dcd(dcd_path, top=md_top)
+            # all_positions = np.concatenate([initial_pos * 10, traj.xyz * 10])  # nm to Å
 
-            # Select Cα atoms to match TICA training
-            ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
-            ca_positions = all_positions[:, ca_indices, :]
-            segment.pcoord = self.pcoord_calculator.calculate(ca_positions)
+            # # Select Cα atoms to match TICA training
+            # ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
+            # ca_positions = all_positions[:, ca_indices, :]
+            # segment.pcoord = self.pcoord_calculator.calculate(ca_positions)
+            # segment.status = Segment.SEG_STATUS_COMPLETE
+            # segment.walltime = time.time() - starttime
+
+
+
+            # #Use cached topology and selection
+            # traj = mdtraj.load_dcd(dcd_path, top=self.md_top)
+            # #Build a trajectory for the intiial frame and join so pcoord includes it
+            # init_traj = mdtraj.Trajectory(xyz=initial_pos, topology=self.md_top) #initial_pos is nm, shape (1,n,3)
+            # full_traj = init_traj.join(traj)
+
+            # #Slice both to the selected atoms and compute RMSD vs reference (frame 0)
+            # traj_sel = full_traj.atom_slice(self.sel_idx)
+            # ref_sel = self.ref_traj #already sliced
+            # rmsd_vals = mdtraj.rmsd(traj_sel, ref_sel, frame=0) #shape (n_frames,)
+
+            # #WESTPA expects (n_frames, pcoord_dim)
+            # segment.pcoord = rmsd_vals.reshape(-1, 1).astype(np.float32)
+            # segment.status = Segment.SEG_STATUS_COMPLETE
+            # segment.walltime = time.time() - starttime
+
+
+            # Import RMSD helpers from get_distance.py
+            from common_files.get_distance import build_distance_array_rmsd, traj_from_numpy
+
+            # Prepare reference, parent, and segment trajectories
+            base_traj = mdtraj.load(
+                os.path.join(self.sim_root, "bstates", "bstate.xml"),
+                top=os.path.join(self.sim_root, "bstates", "bstate.pdb")
+            )
+            parent_traj = mdtraj.load('parent.xml', top='bstate.pdb')
+            traj = traj_from_numpy(parent_traj, os.path.join(segment_outdir, "seg.npz"))
+
+            # Compute RMSD using helper
+            d_arr = build_distance_array_rmsd(base_traj, parent_traj, traj)
+
+            # WESTPA expects shape (n_frames, pcoord_dim)
+            segment.pcoord = d_arr.reshape(-1, 1).astype(np.float32)
             segment.status = Segment.SEG_STATUS_COMPLETE
             segment.walltime = time.time() - starttime
+
 
         current_time = datetime.now().strftime("%H:%M:%S")
         print(f"{current_time}: Finished {len(segments)} segments in {time.time() - starttime:0.2f}s")
         return segments
-
