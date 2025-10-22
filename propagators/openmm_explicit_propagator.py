@@ -1,8 +1,16 @@
-from openmm_propagator import OpenMMPropagator
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from file_system.md_store.save_dcd import get_solute_indices, SoluteDCDReporter
+from propagators.openmm_propagator import OpenMMPropagator 
+
 from openmm.app import PME, HBonds
 from openmm import MonteCarloBarostat
 from openmm.unit import atmospheres, kelvin
-from ..file_system.md_store.save_dcd import get_solute_indices, SoluteDCDReporter
 
 import mdtraj
 import numpy as np

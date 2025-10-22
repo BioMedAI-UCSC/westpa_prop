@@ -22,7 +22,6 @@ class OpenMMPropagator(BasePropagator):
     
     def _load_config(self):
         cgschnet_path = self.rc.config.require(['west', 'openmm', 'cgschnet_path'])
-        print(cgschnet_path)
         if cgschnet_path not in sys.path:
             sys.path.append(cgschnet_path)
         import simulate
@@ -51,10 +50,10 @@ class OpenMMPropagator(BasePropagator):
         
         self.gpu_precision = config.get('gpu_precision', 'single')
         
-        topology_path = os.path.expandvars(config['topology_path'])
-        forcefield_files = config['forcefield']
-        self.pdb = PDBFile(topology_path)
-        self.forcefield = ForceField(*forcefield_files)
+        self.topology_path = os.path.expandvars(config['topology_path'])
+        self.forcefield_files = config['forcefield']
+        self.pdb = PDBFile(self.topology_path)
+        self.forcefield = ForceField(*self.forcefield_files)
         self.nonbondedMethod = None
     
     def _get_pcoord_config(self):

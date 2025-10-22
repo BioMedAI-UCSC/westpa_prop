@@ -1,8 +1,16 @@
+import sys
+from pathlib import Path
+
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from westpa.core.states import BasisState, InitialState
 from westpa.core.segment import Segment
 
 from file_system.md_store.save_npz import save_cg_npz
 from file_system.md_store.save_dcd import write_dcd_from_positions
+from propagators.base_propagator import BasePropagator
 
 import torch
 import numpy as np
@@ -11,13 +19,13 @@ import sys
 import os
 import json
 
-from torchmd.integrator import maxwell_boltzmann
-
+from torchmd.integrator import maxwell_boltzmann, Integrator
+from torchmd.wrapper import Wrapper
 
 class CGMLPropagator(BasePropagator):
     
     def __init__(self, rc=None):
-        super(CGPropagator, self).__init__(rc)
+        super(CGMLPropagator, self).__init__(rc)
     
     def _load_config(self):
         device = "cuda"
@@ -67,8 +75,6 @@ class CGMLPropagator(BasePropagator):
         self.md_system = system
         self.md_forces = forces
         
-        from torchmd.integrator import Integrator
-        from torchmd.wrapper import Wrapper
         
         self.integrator = Integrator(system, forces, self.timestep, device,
                                     gamma=1, T=self.temperature)
