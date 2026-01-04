@@ -61,11 +61,16 @@ class OpenMMPropagator(BasePropagator):
     
     def get_pcoord(self, state):
         if isinstance(state, BasisState):
+            """
             ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
             positions = self.pdb.positions
             ca_positions = np.array([positions[i].value_in_unit(nanometer) for i in ca_indices])
             ca_positions = ca_positions[np.newaxis, :, :] * 10.0
             state.pcoord = self.pcoord_calculator.calculate(ca_positions)
+            """
+            positions = np.array([position.value_in_unit(nanometer) for position in self.pdb.positions])
+            positions = positions[np.newaxis, :, :] * 10.0
+            state.pcoord = self.pcoord_calculator.calculate(positions).reshape((-1, 1))
             return
         elif isinstance(state, InitialState):
             raise NotImplementedError
@@ -114,6 +119,7 @@ class OpenMMPropagator(BasePropagator):
             
             state = simulation.context.getState(getPositions=True)
             initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+            print(initial_pos)
             return np.array([initial_pos])
             
         elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
@@ -123,6 +129,8 @@ class OpenMMPropagator(BasePropagator):
             simulation.context.setVelocitiesToTemperature(self.temperature)
             state = simulation.context.getState(getPositions=True)
             initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+            print("Initial Position\n")
+            print(initial_pos)
             return np.array([initial_pos])
         else:
             raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
@@ -150,6 +158,8 @@ class OpenMMPropagator(BasePropagator):
             energy_k.append(state.getKineticEnergy().value_in_unit(kilojoule_per_mole))
             energy_u.append(state.getPotentialEnergy().value_in_unit(kilojoule_per_mole))
         
+        print("Positions List: \n")
+        print(positions_list)
         return times, forces, energy_k, energy_u, positions_list
     
     def _save_final_state(self, simulation, segment_outdir):
@@ -157,6 +167,7 @@ class OpenMMPropagator(BasePropagator):
             getPositions=True, getVelocities=True, getForces=True,
             getEnergy=True, enforcePeriodicBox=True
         )
+        print(state)
         with open(os.path.join(segment_outdir, "seg.xml"), 'w') as f:
             f.write(XmlSerializer.serialize(state))
     

@@ -122,7 +122,5 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
             npz_path = os.path.join(segment_outdir, 'seg.npz')
             positions = np.load(npz_path)['positions']
             all_positions = np.concatenate([initial_pos * 10, positions * 10])
-        
-        ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
-        ca_positions = all_positions[:, ca_indices, :]
-        return self.pcoord_calculator.calculate(ca_positions)
+
+        return self.pcoord_calculator.calculate(all_positions).reshape((-1, 1))
