@@ -119,7 +119,6 @@ class OpenMMPropagator(BasePropagator):
             
             state = simulation.context.getState(getPositions=True)
             initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-            print(initial_pos)
             return np.array([initial_pos])
             
         elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
@@ -129,8 +128,6 @@ class OpenMMPropagator(BasePropagator):
             simulation.context.setVelocitiesToTemperature(self.temperature)
             state = simulation.context.getState(getPositions=True)
             initial_pos = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-            print("Initial Position\n")
-            print(initial_pos)
             return np.array([initial_pos])
         else:
             raise ValueError(f"Unsupported segment initpoint type: {segment.initpoint_type}")
@@ -158,16 +155,14 @@ class OpenMMPropagator(BasePropagator):
             energy_k.append(state.getKineticEnergy().value_in_unit(kilojoule_per_mole))
             energy_u.append(state.getPotentialEnergy().value_in_unit(kilojoule_per_mole))
         
-        print("Positions List: \n")
-        print(positions_list)
         return times, forces, energy_k, energy_u, positions_list
     
     def _save_final_state(self, simulation, segment_outdir):
         state = simulation.context.getState(
             getPositions=True, getVelocities=True, getForces=True,
-            getEnergy=True, enforcePeriodicBox=True
+            getEnergy=True, enforcePeriodicBox=False
         )
-        print(state)
+        pos_nm = state.getPositions(asNumpy=True).value_in_unit(nanometer)
         with open(os.path.join(segment_outdir, "seg.xml"), 'w') as f:
             f.write(XmlSerializer.serialize(state))
     
