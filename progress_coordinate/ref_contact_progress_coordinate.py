@@ -41,6 +41,7 @@ class RefContactProgressCoordinate(BaseProgressCoordinate):
         self.cutoff_angstrom = float(cutoff_angstrom)
         self.selection_pairs = selection_pairs
 
+
         # --- load reference ---
         if reference_xml_path is not None:
             full_ref = mdtraj.load(reference_xml_path, top=reference_pdb_path)
@@ -68,6 +69,7 @@ class RefContactProgressCoordinate(BaseProgressCoordinate):
                 raise ValueError(f"No atoms found for selection '{sel_a}'")
             if b_atoms.size == 0:
                 raise ValueError(f"No atoms found for selection '{sel_b}'")
+
 
             A = ref_xyz[a_atoms]  # (Na,3)
             B = ref_xyz[b_atoms]  # (Nb,3)
