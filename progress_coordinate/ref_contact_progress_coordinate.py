@@ -31,18 +31,18 @@ class RefContactProgressCoordinate(BaseProgressCoordinate):
         Args:
             reference_pdb_path: Path to reference PDB
             selection_pairs: List of tuples of MDTraj selection strings, e.g.,
-                [("chainid 0", "chainid 1"), ("chainid 1", "chainid 2")]
-                or [("resid 10 to 20", "resid 50 to 60")]
+                [("chainid 0 and residue 124 and name CE", "chainid 1 and residue 76 and name O")]
+                or [("chainid 0", "chainid 1"), ("resid 10 to 20", "resid 50 to 60")]
             reference_xml_path: Optional path to reference XML topology
-            cutoff_angstrom: Distance cutoff for contacts
+            cutoff_angstrom: Distance cutoff for contacts (default: 3.0 Å).
+                If set to 0 or negative, all atom pairs between selections are included (no cutoff).
         """
         super().__init__()
 
         self.cutoff_angstrom = float(cutoff_angstrom)
         self.selection_pairs = selection_pairs
 
-
-        # --- load reference ---
+        # Load reference structure
         if reference_xml_path is not None:
             full_ref = mdtraj.load(reference_xml_path, top=reference_pdb_path)
         else:
@@ -54,10 +54,9 @@ class RefContactProgressCoordinate(BaseProgressCoordinate):
         self.reference_traj = full_ref[0]
         top = self.reference_traj.topology
 
-        # --- precompute reference contact indices ---
+        # Precompute reference contact indices
         self.ref_contact_pairs = {}
         cutoff_nm = self.cutoff_angstrom / 10.0
-
         ref_xyz = self.reference_traj.xyz[0]  # nm
 
         for pair_idx, (sel_a, sel_b) in enumerate(self.selection_pairs):
@@ -70,19 +69,25 @@ class RefContactProgressCoordinate(BaseProgressCoordinate):
             if b_atoms.size == 0:
                 raise ValueError(f"No atoms found for selection '{sel_b}'")
 
-
             A = ref_xyz[a_atoms]  # (Na,3)
             B = ref_xyz[b_atoms]  # (Nb,3)
 
-            # distance matrix (Na,Nb)
-            d = np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(axis=2))
-            ia, ib = np.where(d < cutoff_nm)
+            # If cutoff <= 0, include all atom pairs without distance filtering
+            if self.cutoff_angstrom <= 0:
+                # Create all pairs (cartesian product)
+                ia, ib = np.meshgrid(np.arange(len(a_atoms)), np.arange(len(b_atoms)), indexing='ij')
+                ia = ia.ravel()
+                ib = ib.ravel()
+            else:
+                # Distance matrix (Na,Nb)
+                d = np.sqrt(((A[:, None, :] - B[None, :, :]) ** 2).sum(axis=2))
+                ia, ib = np.where(d < cutoff_nm)
 
-            if ia.size == 0:
-                raise ValueError(
-                    f"No reference contacts for pair ({sel_a}, {sel_b}) "
-                    f"at cutoff {self.cutoff_angstrom} Å"
-                )
+                if ia.size == 0:
+                    raise ValueError(
+                        f"No reference contacts for pair ({sel_a}, {sel_b}) "
+                        f"at cutoff {self.cutoff_angstrom} Å"
+                    )
 
             self.ref_contact_pairs[pair_idx] = (
                 a_atoms[ia].astype(int),
