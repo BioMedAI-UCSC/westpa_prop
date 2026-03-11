@@ -61,11 +61,16 @@ class OpenMMPropagator(BasePropagator):
     
     def get_pcoord(self, state):
         if isinstance(state, BasisState):
+            """
             ca_indices = [atom.index for atom in self.pdb.topology.atoms() if atom.name == 'CA']
             positions = self.pdb.positions
             ca_positions = np.array([positions[i].value_in_unit(nanometer) for i in ca_indices])
             ca_positions = ca_positions[np.newaxis, :, :] * 10.0
             state.pcoord = self.pcoord_calculator.calculate(ca_positions)
+            """
+            positions = np.array([position.value_in_unit(nanometer) for position in self.pdb.positions])
+            positions = positions[np.newaxis, :, :] * 10.0
+            state.pcoord = self.pcoord_calculator.calculate(positions).reshape((-1, 1))
             return
         elif isinstance(state, InitialState):
             raise NotImplementedError
@@ -155,8 +160,9 @@ class OpenMMPropagator(BasePropagator):
     def _save_final_state(self, simulation, segment_outdir):
         state = simulation.context.getState(
             getPositions=True, getVelocities=True, getForces=True,
-            getEnergy=True, enforcePeriodicBox=True
+            getEnergy=True, enforcePeriodicBox=False
         )
+        pos_nm = state.getPositions(asNumpy=True).value_in_unit(nanometer)
         with open(os.path.join(segment_outdir, "seg.xml"), 'w') as f:
             f.write(XmlSerializer.serialize(state))
     
