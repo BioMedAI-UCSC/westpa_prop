@@ -7,7 +7,7 @@ from westpa.core.propagators import WESTPropagator
 from westpa.core.segment import Segment
 
 from computation.recorded_computation import RecordedComputation
-from computation.recorded_io import persist
+from file_system.recorded_io import persist
 
 
 class BasePropagator(WESTPropagator):
