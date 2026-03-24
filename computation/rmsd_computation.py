@@ -20,7 +20,7 @@ class RMSDComputation(BaseComputation):
         self.topology   = self.reference.topology
         self.components = components
 
-    def calculate(self, data: np.ndarray) -> np.ndarray:
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         self._validate_input(data)
         data_nm = (data[:, self.atom_indices, :] / 10.0).astype(np.float32)
         traj = mdtraj.Trajectory(data_nm, self.topology)

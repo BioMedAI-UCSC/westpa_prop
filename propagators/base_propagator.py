@@ -46,8 +46,10 @@ class BasePropagator(WESTPropagator):
             computation.class           — BaseComputation subclass to instantiate
             computation.*               — kwargs forwarded to the computation
 
-        Computations with requires_positions=False are skipped online;
-        run scripts/compute_recorded.py for those.
+        Online execution rules:
+            requires_positions=True  → runs via _run_recorded() (position pipeline)
+            requires_energy=True     → runs via _run_recorded() (energy pipeline)
+            both False               → skipped online; run compute_recorded.py instead
 
         west.cfg layout:
             recorded_calculators:
@@ -68,10 +70,13 @@ class BasePropagator(WESTPropagator):
             computation     = westpa.core.extloader.get_object(class_path)(**comp_cfg)
             recorded        = RecordedComputation(computation=computation, **cfg)
 
-            if not getattr(recorded.computation, "requires_positions", True):
+            requires_positions = getattr(recorded.computation, "requires_positions", True)
+            requires_energy    = getattr(recorded.computation, "requires_energy",    False)
+
+            if not requires_positions and not requires_energy:
                 print(
-                    f"[recorded] '{recorded.name}' requires_positions=False — "
-                    f"skipping online, run compute_recorded.py instead."
+                    f"[recorded] '{recorded.name}' requires_positions=False and "
+                    f"requires_energy=False — skipping online, run compute_recorded.py instead."
                 )
                 continue
 
@@ -80,10 +85,29 @@ class BasePropagator(WESTPropagator):
     def _get_recorded_configs(self):
         raise NotImplementedError
 
-    def _run_recorded(self, positions: "np.ndarray", segment_outdir: str, n_iter: int, seg_id: int):
+    def _run_recorded(
+        self,
+        positions: "np.ndarray",
+        energy_data: dict,
+        segment_outdir: str,
+        n_iter: int,
+        seg_id: int,
+    ):
         """
         Called inside propagate() after pcoord is set.
-        positions: (n_frames+1, n_atoms, 3) Angstrom, includes parent frame.
+        Runs all recorded calculators, passing both positions and energy_data
+        to each. Each computation uses whichever it needs and ignores the rest.
+
+        Parameters
+        ----------
+        positions : np.ndarray
+            (n_frames+1, n_atoms, 3) Angstrom, includes parent frame.
+        energy_data : dict
+            Keys: energy_k, energy_u, times — as returned by _run_simulation().
+            Pass an empty dict if no energy data is available.
+        segment_outdir : str
+        n_iter : int
+        seg_id : int
         """
         if not self.recorded_calculators:
             return
@@ -94,7 +118,7 @@ class BasePropagator(WESTPropagator):
 
         for recorded in self.recorded_calculators:
             try:
-                values = recorded.calculate(positions)
+                values = recorded.calculate(positions, energy_data)
                 persist(recorded, values, west_h5_path, segment_outdir, n_iter, seg_id)
             except Exception as e:
                 print(f"[recorded] WARNING: '{recorded.name}' failed iter={n_iter} seg={seg_id}: {e}")

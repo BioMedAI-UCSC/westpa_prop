@@ -12,7 +12,7 @@ class BaseComputation:
     data convention: (n_frames, n_atoms, 3) float32, Angstrom.
     """
 
-    def calculate(self, data: np.ndarray) -> np.ndarray:
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         raise NotImplementedError
 
     def _validate_input(self, data: np.ndarray):

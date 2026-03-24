@@ -153,7 +153,7 @@ class CGMLPropagator(BasePropagator):
                 )
 
             pcoord_pos     = np.array([parent_pos[i]] + pos_frames)
-            segment.pcoord = self.pcoord_calculator.calculate(pcoord_pos)
+            segment.pcoord = self.pcoord_calculator.calculate(pcoord_pos, None)
 
             self._run_recorded(pcoord_pos, segment_outdir, segment.n_iter, segment.seg_id)
             self._finalize_segment(segment, starttime)

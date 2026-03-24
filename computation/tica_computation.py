@@ -13,7 +13,7 @@ class TICAComputation(BaseComputation):
         self.tica_model = model.tica_model
         self.components = components  # None -> all components
 
-    def calculate(self, data: np.ndarray) -> np.ndarray:
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         self._validate_input(data)
         n_atoms = data.shape[1]
         a, b = np.triu_indices(n_atoms, k=1)

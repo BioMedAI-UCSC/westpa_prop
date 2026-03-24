@@ -53,7 +53,7 @@ class OpenMMExplicitPropagator(OpenMMPropagator):
                                 enforcePeriodicBox=False, append=False)
             )
     
-    def _calculate_pcoord(self, segment_outdir, initial_pos):
+    def _calculate_pcoord(self, segment_outdir, initial_pos, energy_data):
         initial_pos_solute = initial_pos[:, self.solute_atom_indices, :]
         
         if self.save_format == 'dcd':
@@ -68,4 +68,4 @@ class OpenMMExplicitPropagator(OpenMMPropagator):
         
         ca_indices = [atom.index for atom in self.md_top_solute.atoms if atom.name == 'CA']
         ca_positions = all_positions[:, ca_indices, :]
-        return self.pcoord_calculator.calculate(ca_positions)
+        return self.pcoord_calculator.calculate(ca_positions, energy_data)

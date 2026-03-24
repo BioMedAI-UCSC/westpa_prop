@@ -112,7 +112,7 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
             simulation.reporters.clear()
             simulation.reporters.append(FullDCDReporter(dcd_path, self.save_steps))
     
-    def _calculate_pcoord(self, segment_outdir, initial_pos):
+    def _calculate_pcoord(self, segment_outdir, initial_pos, energy_data):
         if self.save_format == 'dcd':
             dcd_path = os.path.join(segment_outdir, 'seg.dcd')
             md_top = mdtraj.Topology.from_openmm(self.pdb.topology)
@@ -123,4 +123,4 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
             positions = np.load(npz_path)['positions']
             all_positions = np.concatenate([initial_pos * 10, positions * 10])
 
-        return self.pcoord_calculator.calculate(all_positions).reshape((-1, 1))
+        return self.pcoord_calculator.calculate(all_positions, energy_data).reshape((-1, 1))

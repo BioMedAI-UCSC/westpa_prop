@@ -53,7 +53,7 @@ class MultiChainRMSDComputation(BaseComputation):
 
         self.n_chains = len(self.chain_atom_indices)
 
-    def calculate(self, data: np.ndarray) -> np.ndarray:
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         self._validate_input(data)
         traj  = mdtraj.Trajectory(data / 10.0, self.reference_traj.topology)
         xyz0  = traj.xyz.copy()

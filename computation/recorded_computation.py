@@ -1,5 +1,5 @@
 from enum import Enum
-
+import numpy as np
 from computation.base_computation import BaseComputation
 
 
@@ -52,8 +52,8 @@ class RecordedComputation:
                 f"computation must be a BaseComputation instance, got {type(computation)}"
             )
 
-    def calculate(self, data):
-        return self.computation.calculate(data)
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
+        return self.computation.calculate(data, energy)
 
     @property
     def requires_positions(self) -> bool:

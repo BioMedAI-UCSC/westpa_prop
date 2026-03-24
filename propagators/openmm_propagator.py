@@ -65,7 +65,7 @@ class OpenMMPropagator(BasePropagator):
         if isinstance(state, BasisState):
             positions = np.array([p.value_in_unit(nanometer) for p in self.pdb.positions])
             positions = positions[np.newaxis, :, :] * 10.0
-            state.pcoord = self.pcoord_calculator.calculate(positions).reshape((-1, 1))
+            state.pcoord = self.pcoord_calculator.calculate(positions, {}).reshape((-1, 1))
             return
         raise NotImplementedError
 
@@ -140,7 +140,7 @@ class OpenMMPropagator(BasePropagator):
         with open(os.path.join(segment_outdir, "seg.xml"), "w") as f:
             f.write(XmlSerializer.serialize(state))
 
-    def _calculate_pcoord(self, segment_outdir, initial_pos):
+    def _calculate_pcoord(self, segment_outdir, initial_pos, energy_data):
         raise NotImplementedError
 
     def propagate(self, segments):
@@ -155,16 +155,24 @@ class OpenMMPropagator(BasePropagator):
             self._setup_reporters(simulation, segment_outdir)
             times, forces, energy_k, energy_u, positions_list = self._run_simulation(simulation)
 
+            energy_data = {"energy_k": energy_k, "energy_u": energy_u, "times": times}
+
             if self.save_format == "npz":
                 save_openmm_npz(segment_outdir, times, forces, energy_k, energy_u, positions_list)
 
             self._save_final_state(simulation, segment_outdir)
-            segment.pcoord = self._calculate_pcoord(segment_outdir, initial_pos)
+            segment.pcoord = self._calculate_pcoord(segment_outdir, initial_pos, energy_data)
 
             all_positions_ang = np.concatenate(
                 [initial_pos * 10.0, np.array(positions_list) * 10.0], axis=0
             )
-            self._run_recorded(all_positions_ang, segment_outdir, segment.n_iter, segment.seg_id)
+            self._run_recorded(
+                positions=all_positions_ang,
+                energy_data=energy_data,
+                segment_outdir=segment_outdir,
+                n_iter=segment.n_iter,
+                seg_id=segment.seg_id,
+            )
 
             self._finalize_segment(segment, starttime)
 

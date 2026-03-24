@@ -49,7 +49,7 @@ class RefContactComputation(BaseComputation):
 
             self.contact_pairs[idx] = (a_atoms[ia].astype(int), b_atoms[ib].astype(int))
 
-    def calculate(self, data: np.ndarray) -> np.ndarray:
+    def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         self._validate_input(data)
         traj = mdtraj.Trajectory(data / 10.0, self.reference_traj.topology)
         out  = np.zeros(traj.n_frames, dtype=np.float32)
