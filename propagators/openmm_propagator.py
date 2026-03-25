@@ -63,9 +63,18 @@ class OpenMMPropagator(BasePropagator):
 
     def get_pcoord(self, state):
         if isinstance(state, BasisState):
-            positions = np.array([p.value_in_unit(nanometer) for p in self.pdb.positions])
-            positions = positions[np.newaxis, :, :] * 10.0
-            state.pcoord = self.pcoord_calculator.calculate(positions, {}).reshape((-1, 1))
+            simulation = self._create_simulation(seg_id=0)
+            simulation.context.setPositions(self.pdb.positions)
+            simulation.minimizeEnergy()
+            openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
+            
+            positions = openmm_state.getPositions(asNumpy=True).value_in_unit(nanometer)
+            positions = positions[np.newaxis, :, :] * 10.0  # (1, n_atoms, 3) Angstrom
+
+            energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+            energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
+
+            state.pcoord = self.pcoord_calculator.calculate(positions, energy_data).reshape((-1, 1))
             return
         raise NotImplementedError
 
@@ -102,17 +111,25 @@ class OpenMMPropagator(BasePropagator):
             parent_outdir = self._get_parent_outdir(segment)
             with open(os.path.join(parent_outdir, "seg.xml")) as f:
                 simulation.context.setState(XmlSerializer.deserialize(f.read()))
-            pos = simulation.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(nanometer)
-            return np.array([pos])
 
-        if segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
+        elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
             simulation.context.setPositions(self.pdb.positions)
             simulation.minimizeEnergy()
             simulation.context.setVelocitiesToTemperature(self.temperature)
-            pos = simulation.context.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(nanometer)
-            return np.array([pos])
 
-        raise ValueError(f"Unsupported initpoint_type: {segment.initpoint_type}")
+        else:
+            raise ValueError(f"Unsupported initpoint_type: {segment.initpoint_type}")
+
+        return self._get_state_and_energy(simulation)
+
+    def _get_state_and_energy(self, simulation):
+        state    = simulation.context.getState(getPositions=True, getEnergy=True)
+        pos      = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+        energy_u = state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+        energy_k = state.getKineticEnergy().value_in_unit(kilojoule_per_mole)
+        time     = state.getTime().value_in_unit(picosecond)
+        return np.array([pos]), {"energy_k": energy_k, "energy_u": energy_u, "times": time}
+
 
     def _setup_reporters(self, simulation, segment_outdir):
         raise NotImplementedError
@@ -151,11 +168,15 @@ class OpenMMPropagator(BasePropagator):
             segment_outdir = self._get_segment_outdir(segment)
             os.makedirs(segment_outdir, exist_ok=True)
 
-            initial_pos = self._init_segment_state(simulation, segment)
+            initial_pos, initial_energy = self._init_segment_state(simulation, segment)
             self._setup_reporters(simulation, segment_outdir)
             times, forces, energy_k, energy_u, positions_list = self._run_simulation(simulation)
 
-            energy_data = {"energy_k": energy_k, "energy_u": energy_u, "times": times}
+            energy_data = {
+                "energy_k": [initial_energy["energy_k"]] + energy_k,
+                "energy_u": [initial_energy["energy_u"]] + energy_u,
+                "times":    [initial_energy["times"]]    + times,
+            }
 
             if self.save_format == "npz":
                 save_openmm_npz(segment_outdir, times, forces, energy_k, energy_u, positions_list)
