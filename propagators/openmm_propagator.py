@@ -39,14 +39,13 @@ class OpenMMPropagator(BasePropagator):
         self.save_steps          = config["save_steps"]
         self.save_format         = self._get_save_format(["west", "openmm"])
 
-        try:
-            platform      = Platform.getPlatformByName("CUDA")
-            self.num_gpus = int(config.get("num_gpus", 1))
-            if self.num_gpus == -1:
-                default       = platform.getPropertyDefaultValue("CudaDeviceIndex")
-                self.num_gpus = default.count(",") + 1 if "," in default else 1
-        except Exception:
-            self.num_gpus = 1
+        # Do NOT initialize the CUDA driver here: the master process forks/spawns
+        # workers, and a CUDA context touched pre-fork yields CUDA_ERROR_NOT_INITIALIZED
+        # in workers. Platform access is deferred to the workers (_get_platform).
+        self.num_gpus = int(config.get("num_gpus", 1))
+        if self.num_gpus == -1:
+            cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            self.num_gpus = len([x for x in cvd.split(",") if x != ""]) or 1
 
         self.gpu_precision    = config.get("gpu_precision", "single")
         self.topology_path    = os.path.expandvars(config["topology_path"])
