@@ -10,3 +10,5 @@ west.h5
 pdist.h5
 hist.pdf
 west.db
+
+analysis_out/

@@ -1,23 +1,10 @@
 import json
 
 import numpy as np
-import mdtraj
 
 from computation.base_computation import BaseComputation
-
-
-AA = ["ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
-      "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"]
-AA_INDEX = {a: i for i, a in enumerate(AA)}
-
-KD = {"ALA": 1.8, "ARG": -4.5, "ASN": -3.5, "ASP": -3.5, "CYS": 2.5, "GLN": -3.5,
-      "GLU": -3.5, "GLY": -0.4, "HIS": -3.2, "ILE": 4.5, "LEU": 3.8, "LYS": -3.9,
-      "MET": 1.9, "PHE": 2.8, "PRO": -1.6, "SER": -0.8, "THR": -0.7, "TRP": -0.9,
-      "TYR": -1.3, "VAL": 4.2}
-
-ALIASES = {"HID": "HIS", "HIE": "HIS", "HIP": "HIS", "HSD": "HIS", "HSE": "HIS",
-           "HSP": "HIS", "CYX": "CYS", "CYM": "CYS", "ASH": "ASP", "GLH": "GLU",
-           "LYN": "LYS", "MSE": "MET"}
+from computation.residue_utils import (AA, AA_INDEX, KD, ALIASES,
+                                       load_topology, residue_reps)
 
 
 class ContactEnergyComputation(BaseComputation):
@@ -51,9 +38,9 @@ class ContactEnergyComputation(BaseComputation):
             raise ValueError(f"bad scheme {scheme!r}")
 
         self.M = self._load_potential(potential)
-        top = mdtraj.load(topology_path).topology
-        self.res_a = self._residues(top, selection_a, exclude_hydrogens)
-        self.res_b = self._residues(top, selection_b, exclude_hydrogens)
+        top = load_topology(topology_path)
+        self.res_a = residue_reps(top, selection_a, scheme, exclude_hydrogens)
+        self.res_b = residue_reps(top, selection_b, scheme, exclude_hydrogens)
         if not self.res_a or not self.res_b:
             raise ValueError("A selection matched zero typed residues")
         self.types_a = np.array([r["type"] for r in self.res_a])
@@ -75,32 +62,6 @@ class ContactEnergyComputation(BaseComputation):
         M = np.zeros((20, 20))
         M[np.ix_(idx, idx)] = mat
         return M
-
-    def _residues(self, top, selection, exclude_h):
-        sel = f"({selection}) and not element H" if exclude_h else selection
-        atom_set = set(top.select(sel).tolist())
-        out = []
-        for res in top.residues:
-            name = ALIASES.get(res.name, res.name)
-            if name not in AA_INDEX:
-                continue
-            atoms = [a for a in res.atoms if a.index in atom_set]
-            if not atoms:
-                continue
-            entry = {"type": AA_INDEX[name],
-                     "heavy": np.array([a.index for a in atoms], dtype=int)}
-            if self.scheme in ("cb", "ca"):
-                entry["rep"] = self._rep_atom(res, atom_set)
-            out.append(entry)
-        return out
-
-    def _rep_atom(self, res, atom_set):
-        want = "CA" if self.scheme == "ca" else "CB"
-        names = {a.name: a.index for a in res.atoms if a.index in atom_set}
-        for n in (want, "CA", "CB"):
-            if n in names:
-                return names[n]
-        return next(iter(names.values()))
 
     def calculate(self, data: np.ndarray, energy: dict = None) -> np.ndarray:
         self._validate_input(data)
