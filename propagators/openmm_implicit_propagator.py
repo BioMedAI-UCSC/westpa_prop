@@ -123,4 +123,10 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
             positions = np.load(npz_path)['positions']
             all_positions = np.concatenate([initial_pos * 10, positions * 10])
 
-        return self.pcoord_calculator.calculate(all_positions, energy_data).reshape((-1, 1))
+        pcoord = self.pcoord_calculator.calculate(all_positions, energy_data)
+        pcoord = np.asarray(pcoord, dtype=np.float32) 
+
+        assert pcoord.shape == (self.steps // self.save_steps + 1, 2)
+        assert np.all(np.isfinite(pcoord))
+
+        return pcoord

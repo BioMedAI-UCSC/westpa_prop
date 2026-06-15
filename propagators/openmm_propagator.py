@@ -74,7 +74,14 @@ class OpenMMPropagator(BasePropagator):
             energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
             energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
 
-            state.pcoord = self.pcoord_calculator.calculate(positions, energy_data).reshape((-1, 1))
+            pcoord = self.pcoord_calculator.calculate(positions, energy_data)
+            pcoord = np.asarray(pcoord, dtype=np.float32)
+            pcoord = np.squeeze(pcoord)
+
+            if pcoord.ndim == 0:
+                pcoord = pcoord.reshape(1)
+
+            state.pcoord = pcoord
             return
         raise NotImplementedError
 
