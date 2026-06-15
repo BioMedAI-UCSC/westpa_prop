@@ -6,7 +6,7 @@ import mdtraj
 
 
 def load_segments(sim_root, topology_pdb, iter_stride=1, seg_stride=1,
-                  max_iters=None, frames="all"):
+                  max_iters=None, frames="all", min_iter=None, max_iter=None):
     """Load per-segment trajectories + RMSD labels from a WESTPA traj_segs tree.
 
     Returns (segments, rmsd, lengths):
@@ -17,6 +17,9 @@ def load_segments(sim_root, topology_pdb, iter_stride=1, seg_stride=1,
     """
     top = mdtraj.load(topology_pdb).topology
     iter_dirs = sorted(d for d in glob.glob(os.path.join(sim_root, "traj_segs", "[0-9]" * 6)))
+    if min_iter is not None or max_iter is not None:
+        lo, hi = min_iter or 0, max_iter or 10 ** 12
+        iter_dirs = [d for d in iter_dirs if lo <= int(os.path.basename(d)) <= hi]
     iter_dirs = iter_dirs[::iter_stride]
     if max_iters:
         iter_dirs = iter_dirs[:max_iters]

@@ -124,9 +124,13 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
             all_positions = np.concatenate([initial_pos * 10, positions * 10])
 
         pcoord = self.pcoord_calculator.calculate(all_positions, energy_data)
-        pcoord = np.asarray(pcoord, dtype=np.float32) 
+        pcoord = np.asarray(pcoord, dtype=np.float32)
 
-        assert pcoord.shape == (self.steps // self.save_steps + 1, 2)
+        nframes = self.steps // self.save_steps + 1
+        ndim = self.rc.config.get(['west', 'system', 'system_options', 'pcoord_ndim'], 1)
+        assert pcoord.shape[0] == nframes, (pcoord.shape, nframes)
+        if ndim > 1:
+            assert pcoord.shape[-1] == ndim, (pcoord.shape, ndim)
         assert np.all(np.isfinite(pcoord))
 
         return pcoord
