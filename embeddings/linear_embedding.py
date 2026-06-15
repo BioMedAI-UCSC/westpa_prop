@@ -1,7 +1,6 @@
 import pickle
 
 import numpy as np
-from sklearn.preprocessing import StandardScaler
 
 from embeddings.base_embedding import BaseEmbedding
 
@@ -46,7 +45,7 @@ class LinearEmbedding(BaseEmbedding):
 
     def _prep_fit(self, X):
         if self.scale:
-            self.scaler = StandardScaler().fit(X)
+            self.scaler = self.fit_scaler(X)
             return self.scaler.transform(X)
         return X
 

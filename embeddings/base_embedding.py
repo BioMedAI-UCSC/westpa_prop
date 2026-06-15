@@ -39,6 +39,16 @@ class BaseEmbedding:
             return "cpu"
 
     @staticmethod
+    def fit_scaler(X, floor_frac=1e-3):
+        """StandardScaler with the per-feature scale floored at floor_frac of the
+        largest scale, so near-constant features can't blow up after transform
+        (avoids degenerate latents when fitting on few/low-variance samples)."""
+        from sklearn.preprocessing import StandardScaler
+        sc = StandardScaler().fit(X)
+        sc.scale_ = np.maximum(sc.scale_, floor_frac * np.max(sc.scale_) + 1e-12)
+        return sc
+
+    @staticmethod
     def flatten(X):
         X = np.asarray(X, dtype=np.float32)
         return X.reshape(X.shape[0], -1)

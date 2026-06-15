@@ -1,7 +1,6 @@
 import pickle
 
 import numpy as np
-from sklearn.preprocessing import StandardScaler
 
 from embeddings.base_embedding import BaseEmbedding
 
@@ -37,7 +36,7 @@ class VAMPNetEmbedding(BaseEmbedding):
         torch.manual_seed(self.seed)
         X = self.flatten(X)
         if self.scale:
-            self.scaler = StandardScaler().fit(X)
+            self.scaler = self.fit_scaler(X)
             X = self.scaler.transform(X)
         trajs = [t.astype(np.float32) for t in self.split_lengths(X, lengths)
                  if len(t) > self.lag]
