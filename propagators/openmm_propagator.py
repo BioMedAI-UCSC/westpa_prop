@@ -12,7 +12,7 @@ import numpy as np
 from openmm.app import PDBFile, ForceField, Simulation
 from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole
-from westpa.core.states import BasisState
+from westpa.core.states import BasisState, InitialState
 from westpa.core.segment import Segment
 
 from file_system.md_store.save_npz import save_openmm_npz
@@ -61,29 +61,50 @@ class OpenMMPropagator(BasePropagator):
     def _get_recorded_configs(self):
         return self.rc.config["west"]["openmm"].get("recorded_calculators", [])
 
-    def get_pcoord(self, state):
+    def _basis_state_positions(self, basis_state):
+        pattern = self.rc.config["west", "data", "data_refs", "basis_state"]
+        path = os.path.expandvars(pattern.format(basis_state=basis_state))
+        pdb = PDBFile(path)
+        n_have, n_need = pdb.topology.getNumAtoms(), self.pdb.topology.getNumAtoms()
+        if n_have != n_need:
+            raise ValueError(
+                f"basis-state atom count {n_have} != system {n_need} ({path}). "
+                f"Generate bstates from the same filtered PDB as topology_path."
+            )
+        return pdb.positions
+
+    def _state_positions(self, state):
+        """Starting coordinates for a basis/initial state; falls back to topology."""
+        bstate = None
         if isinstance(state, BasisState):
-            simulation = self._create_simulation(seg_id=0)
-            simulation.context.setPositions(self.pdb.positions)
-            simulation.minimizeEnergy()
-            openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
-            
-            positions = openmm_state.getPositions(asNumpy=True).value_in_unit(nanometer)
-            positions = positions[np.newaxis, :, :] * 10.0  # (1, n_atoms, 3) Angstrom
+            bstate = state
+        elif isinstance(state, InitialState):
+            bstate = self.basis_states.get(state.basis_state_id)
+        if bstate is not None and getattr(bstate, "auxref", None):
+            return self._basis_state_positions(bstate)
+        return self.pdb.positions
 
-            energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
-            energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
+    def _segment_init_positions(self, segment):
+        istate = self.initial_states.get(segment.initial_state_id)
+        return self._state_positions(istate) if istate is not None else self.pdb.positions
 
-            pcoord = self.pcoord_calculator.calculate(positions, energy_data)
-            pcoord = np.asarray(pcoord, dtype=np.float32)
-            pcoord = np.squeeze(pcoord)
+    def get_pcoord(self, state):
+        simulation = self._create_simulation(seg_id=0)
+        simulation.context.setPositions(self._state_positions(state))
+        simulation.minimizeEnergy()
+        openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
 
-            if pcoord.ndim == 0:
-                pcoord = pcoord.reshape(1)
+        positions = openmm_state.getPositions(asNumpy=True).value_in_unit(nanometer)
+        positions = positions[np.newaxis, :, :] * 10.0  # (1, n_atoms, 3) Angstrom
 
-            state.pcoord = pcoord
-            return
-        raise NotImplementedError
+        energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+        energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
+
+        pcoord = self.pcoord_calculator.calculate(positions, energy_data)
+        pcoord = np.squeeze(np.asarray(pcoord, dtype=np.float32))
+        if pcoord.ndim == 0:
+            pcoord = pcoord.reshape(1)
+        state.pcoord = pcoord
 
     def _get_next_gpu_index(self, segment_id):
         return segment_id % self.num_gpus
@@ -120,7 +141,7 @@ class OpenMMPropagator(BasePropagator):
                 simulation.context.setState(XmlSerializer.deserialize(f.read()))
 
         elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-            simulation.context.setPositions(self.pdb.positions)
+            simulation.context.setPositions(self._segment_init_positions(segment))
             simulation.minimizeEnergy()
             simulation.context.setVelocitiesToTemperature(self.temperature)
 

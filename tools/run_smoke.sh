@@ -12,7 +12,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 ITERS=${ITERS:-3}
 NSTATES=${NSTATES:-8}
 
-for M in pca tica cvae; do
+for M in ${METHODS:-pca tica cvae}; do
   if [ "$M" = "cvae" ]; then FEAT=contact_map; else FEAT=vector; fi
   RUN=$ROOT/runs/smoke_$M
   echo "############################## $M ($FEAT) -> $RUN"
