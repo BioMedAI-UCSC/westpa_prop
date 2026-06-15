@@ -30,11 +30,13 @@ def load_segments(sim_root, topology_pdb, iter_stride=1, seg_stride=1,
         for sdir in seg_dirs:
             dcd = os.path.join(sdir, "seg.dcd")
             npz = os.path.join(sdir, "seg.npz")
-            if not (os.path.isfile(dcd) and os.path.isfile(npz)):
+            if not os.path.isfile(dcd):
                 continue
             try:
                 xyz = mdtraj.load_dcd(dcd, top=top).xyz * 10.0
-                r = np.asarray(np.load(npz)["rmsd_ca"]).reshape(-1)
+                # RMSD label is optional (only present when recorded calcs ran)
+                r = (np.asarray(np.load(npz)["rmsd_ca"]).reshape(-1)
+                     if os.path.isfile(npz) else np.full(len(xyz), np.nan, np.float32))
             except Exception:
                 continue
             if frames == "last":

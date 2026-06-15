@@ -75,7 +75,8 @@ def main():
             xyz = (xyz[-1:] if a.frames == "last" else xyz).astype(np.float32)
             for k, c in calcs.items():
                 v = np.asarray(c.calculate(xyz))
-                rows[k].append(v.reshape(v.shape[0], -1)[-1])  # final frame, flatten
+                v = v.reshape(-1) if v.ndim == 1 else v[-1]  # last frame's vector
+                rows[k].append(np.atleast_1d(v).astype(np.float32))
             meta["n_iter"].append(n)
             meta["seg_id"].append(sid)
             meta["weight"].append(weights.get((n, sid), np.nan))
