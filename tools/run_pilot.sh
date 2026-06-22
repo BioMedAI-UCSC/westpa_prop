@@ -13,15 +13,25 @@ NSTATES=${NSTATES:-24}
 NTRAIN=${NTRAIN:-128}
 NWORKERS=${NWORKERS:-4}
 FEAT=vector; [ "$METHOD" = "cvae" ] && FEAT=contact_map
-RUN=$ROOT/runs/pilot_blind_$METHOD
+RUN=${RUN:-$ROOT/runs/pilot_${MODE:-blind}_$METHOD}
 echo "pilot: $METHOD ($FEAT) iters=$ITERS states=$NSTATES -> $RUN"
 rm -rf "$RUN"; mkdir -p "$RUN/models" "$RUN/seedpool"
 
 # run bstates + a larger pool for a non-degenerate initial model
-python -m seeders.blind_seeder "$TOPO" --sim-root "$RUN" --groups A B \
-    --n-states "$NSTATES" --gap-min 5 --gap-max 12 --seed 1 >"$RUN/seed.log" 2>&1
-python -m seeders.blind_seeder "$TOPO" --sim-root "$RUN/seedpool" --groups A B \
-    --n-states "$NTRAIN" --gap-min 4 --gap-max 20 --seed 100 >"$RUN/seedpool.log" 2>&1
+MODE=${MODE:-blind}            # blind | validation
+TMAX=${TMAX:-8}; RMAX=${RMAX:-15}; MINSEP=${MINSEP:-2}; MAXSEP=${MAXSEP:-20}
+seed_into() {  # $1=dir $2=n_states $3=seed
+  if [ "$MODE" = "validation" ]; then
+    python -m seeders.randomize_seeder "$TOPO" --sim-root "$1" --groups A B \
+      --n-states "$2" --tmax "$TMAX" --rmax "$RMAX" --min-sep "$MINSEP" \
+      --max-sep "$MAXSEP" --seed "$3"
+  else
+    python -m seeders.blind_seeder "$TOPO" --sim-root "$1" --groups A B \
+      --n-states "$2" --gap-min 5 --gap-max 12 --seed "$3"
+  fi
+}
+seed_into "$RUN" "$NSTATES" 1 >"$RUN/seed.log" 2>&1
+seed_into "$RUN/seedpool" "$NTRAIN" 100 >"$RUN/seedpool.log" 2>&1
 
 python - "$TEMPLATE" "$RUN/west.cfg" "$METHOD" "$FEAT" "$ITERS" <<'PY'
 import sys
