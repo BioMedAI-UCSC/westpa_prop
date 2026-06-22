@@ -10,9 +10,9 @@ if str(project_root) not in sys.path:
 
 import numpy as np
 from openmm.app import PDBFile, ForceField, Simulation
-from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer
+from openmm import Platform, LangevinMiddleIntegrator, XmlSerializer, Vec3
 from openmm.unit import kelvin, picosecond, femtosecond, nanometer, kilojoule_per_mole
-from westpa.core.states import BasisState
+from westpa.core.states import BasisState, InitialState
 from westpa.core.segment import Segment
 
 from file_system.md_store.save_npz import save_openmm_npz
@@ -34,19 +34,25 @@ class OpenMMPropagator(BasePropagator):
         self.barostatInterval    = int(config.get("barostatInterval", 25))
         self.constraintTolerance = float(config.get("constraintTolerance", 1e-6))
         self.hydrogenMass        = float(config.get("hydrogenMass", 1.5))
+        # Cap on L-BFGS minimization iterations (0 = OpenMM default = until
+        # convergence). For large freshly-solvated systems the default tolerance
+        # can take 1000s of iters to reach everywhere → bound it (the random-
+        # orientation separated association start needs only light clash relief
+        # before constrained Langevin MD takes over). Applied to BOTH the
+        # basis-state get_pcoord and every NEWTRAJ segment.
+        self.minimize_iters      = int(config.get("minimize_iters", 0))
         self.implicit_solvent    = config.get("implicit_solvent", False)
         self.steps               = config["steps"]
         self.save_steps          = config["save_steps"]
         self.save_format         = self._get_save_format(["west", "openmm"])
 
-        try:
-            platform      = Platform.getPlatformByName("CUDA")
-            self.num_gpus = int(config.get("num_gpus", 1))
-            if self.num_gpus == -1:
-                default       = platform.getPropertyDefaultValue("CudaDeviceIndex")
-                self.num_gpus = default.count(",") + 1 if "," in default else 1
-        except Exception:
-            self.num_gpus = 1
+        # Do NOT initialize the CUDA driver here: the master process forks/spawns
+        # workers, and a CUDA context touched pre-fork yields CUDA_ERROR_NOT_INITIALIZED
+        # in workers. Platform access is deferred to the workers (_get_platform).
+        self.num_gpus = int(config.get("num_gpus", 1))
+        if self.num_gpus == -1:
+            cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            self.num_gpus = len([x for x in cvd.split(",") if x != ""]) or 1
 
         self.gpu_precision    = config.get("gpu_precision", "single")
         self.topology_path    = os.path.expandvars(config["topology_path"])
@@ -61,22 +67,50 @@ class OpenMMPropagator(BasePropagator):
     def _get_recorded_configs(self):
         return self.rc.config["west"]["openmm"].get("recorded_calculators", [])
 
-    def get_pcoord(self, state):
+    def _basis_state_positions(self, basis_state):
+        pattern = self.rc.config["west", "data", "data_refs", "basis_state"]
+        path = os.path.expandvars(pattern.format(basis_state=basis_state))
+        pdb = PDBFile(path)
+        n_have, n_need = pdb.topology.getNumAtoms(), self.pdb.topology.getNumAtoms()
+        if n_have != n_need:
+            raise ValueError(
+                f"basis-state atom count {n_have} != system {n_need} ({path}). "
+                f"Generate bstates from the same filtered PDB as topology_path."
+            )
+        return pdb.positions
+
+    def _state_positions(self, state):
+        """Starting coordinates for a basis/initial state; falls back to topology."""
+        bstate = None
         if isinstance(state, BasisState):
-            simulation = self._create_simulation(seg_id=0)
-            simulation.context.setPositions(self.pdb.positions)
-            simulation.minimizeEnergy()
-            openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
-            
-            positions = openmm_state.getPositions(asNumpy=True).value_in_unit(nanometer)
-            positions = positions[np.newaxis, :, :] * 10.0  # (1, n_atoms, 3) Angstrom
+            bstate = state
+        elif isinstance(state, InitialState):
+            bstate = self.basis_states.get(state.basis_state_id)
+        if bstate is not None and getattr(bstate, "auxref", None):
+            return self._basis_state_positions(bstate)
+        return self.pdb.positions
 
-            energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
-            energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
+    def _segment_init_positions(self, segment):
+        istate = self.initial_states.get(segment.initial_state_id)
+        return self._state_positions(istate) if istate is not None else self.pdb.positions
 
-            state.pcoord = self.pcoord_calculator.calculate(positions, energy_data).reshape((-1, 1))
-            return
-        raise NotImplementedError
+    def get_pcoord(self, state):
+        simulation = self._create_simulation(seg_id=0)
+        simulation.context.setPositions(self._state_positions(state))
+        simulation.minimizeEnergy(maxIterations=self.minimize_iters)
+        openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
+
+        positions = openmm_state.getPositions(asNumpy=True).value_in_unit(nanometer)
+        positions = positions[np.newaxis, :, :] * 10.0  # (1, n_atoms, 3) Angstrom
+
+        energy_u = openmm_state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+        energy_data = {"energy_k": [0.0], "energy_u": [energy_u], "times": [0.0]}
+
+        pcoord = self.pcoord_calculator.calculate(positions, energy_data)
+        pcoord = np.squeeze(np.asarray(pcoord, dtype=np.float32))
+        if pcoord.ndim == 0:
+            pcoord = pcoord.reshape(1)
+        state.pcoord = pcoord
 
     def _get_next_gpu_index(self, segment_id):
         return segment_id % self.num_gpus
@@ -109,12 +143,21 @@ class OpenMMPropagator(BasePropagator):
     def _init_segment_state(self, simulation, segment):
         if segment.initpoint_type == Segment.SEG_INITPOINT_CONTINUES:
             parent_outdir = self._get_parent_outdir(segment)
-            with open(os.path.join(parent_outdir, "seg.xml")) as f:
-                simulation.context.setState(XmlSerializer.deserialize(f.read()))
+            npz = os.path.join(parent_outdir, "seg_restart.npz")
+            if os.path.exists(npz):                       # new binary restart
+                d = np.load(npz)
+                box = d["box"].astype(float)
+                simulation.context.setPeriodicBoxVectors(
+                    Vec3(*box[0]) * nanometer, Vec3(*box[1]) * nanometer, Vec3(*box[2]) * nanometer)
+                simulation.context.setPositions(d["positions"].astype(float) * nanometer)
+                simulation.context.setVelocities(d["velocities"].astype(float) * (nanometer / picosecond))
+            else:                                          # legacy XML restart (back-compat)
+                with open(os.path.join(parent_outdir, "seg.xml")) as f:
+                    simulation.context.setState(XmlSerializer.deserialize(f.read()))
 
         elif segment.initpoint_type == Segment.SEG_INITPOINT_NEWTRAJ:
-            simulation.context.setPositions(self.pdb.positions)
-            simulation.minimizeEnergy()
+            simulation.context.setPositions(self._segment_init_positions(segment))
+            simulation.minimizeEnergy(maxIterations=self.minimize_iters)
             simulation.context.setVelocitiesToTemperature(self.temperature)
 
         else:
@@ -150,12 +193,46 @@ class OpenMMPropagator(BasePropagator):
         return times, forces, energy_k, energy_u, positions_list
 
     def _save_final_state(self, simulation, segment_outdir):
+        # Restart state (positions + velocities + box) for the NEXT iteration's
+        # parent. DEFAULT = binary float32 `seg_restart.npz` (~10x smaller than the
+        # full-system XML; portable across GPUs, unlike OpenMM .chk). Set
+        # WCMD_RESTART_FORMAT=xml to keep writing legacy seg.xml. The xml READ path
+        # (_init_segment_state) is always kept, so runs with old seg.xml parents
+        # resume seamlessly and only new iterations switch to npz.
         state = simulation.context.getState(
-            getPositions=True, getVelocities=True, getForces=True,
-            getEnergy=True, enforcePeriodicBox=False,
+            getPositions=True, getVelocities=True, enforcePeriodicBox=False,
         )
-        with open(os.path.join(segment_outdir, "seg.xml"), "w") as f:
-            f.write(XmlSerializer.serialize(state))
+        if os.environ.get("WCMD_RESTART_FORMAT", "npz").lower() == "xml":
+            with open(os.path.join(segment_outdir, "seg.xml"), "w") as f:
+                f.write(XmlSerializer.serialize(state))
+        else:
+            np.savez(
+                os.path.join(segment_outdir, "seg_restart.npz"),
+                positions=state.getPositions(asNumpy=True).value_in_unit(nanometer).astype(np.float32),
+                velocities=state.getVelocities(asNumpy=True).value_in_unit(nanometer / picosecond).astype(np.float32),
+                box=state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(nanometer).astype(np.float32),
+            )
+
+    def _save_cg_seg(self, segment_outdir, positions_list, forces):
+        """On-the-fly Cα-bead CG projection → cg_seg.npz, alongside the full-system
+        seg.npz (kept for re-mapping flexibility). Bead pos = residue Cα; bead force
+        = Σ residue atoms incl H (exact — full forces are in memory). Defensive:
+        a projection error logs and is skipped, never breaking WE propagation."""
+        try:
+            from wcmd.training.cg_projector import build_ca_bead_map, project_to_ca_beads
+            if getattr(self, "_ca_map", None) is None:
+                self._ca_map = build_ca_bead_map(PDBFile(self.topology_path).topology)
+                root = Path(segment_outdir).parents[2]   # sim_root/traj_segs/iter/seg
+                np.savez(os.path.join(root, "cg_map.npz"), **self._ca_map)
+            cm = self._ca_map
+            cg_pos, cg_force = [], []
+            for p, f in zip(positions_list, forces):
+                cp, cf = project_to_ca_beads(np.asarray(p) * 10.0, np.asarray(f), cm)
+                cg_pos.append(cp); cg_force.append(cf)
+            np.savez(os.path.join(segment_outdir, "cg_seg.npz"),
+                     cg_pos=np.stack(cg_pos), cg_force=np.stack(cg_force))
+        except Exception as e:
+            print(f"[cg] projection skipped ({type(e).__name__}: {e})", flush=True)
 
     def _calculate_pcoord(self, segment_outdir, initial_pos, energy_data):
         raise NotImplementedError
@@ -179,7 +256,18 @@ class OpenMMPropagator(BasePropagator):
             }
 
             if self.save_format == "npz":
-                save_openmm_npz(segment_outdir, times, forces, energy_k, energy_u, positions_list)
+                # Save SOLUTE-only (protein incl H, no water/ions) — water is ~94%
+                # of the system and is not needed for V_θ force-matching (the
+                # protein-atom forces already contain the water-mediated part).
+                # ~16× smaller seg.npz; pcoord (_calculate_pcoord) reads these
+                # solute-order arrays directly. seg.xml (restart) keeps the full
+                # system. Implicit/other propagators without solute indices save full.
+                sol = getattr(self, "solute_atom_indices", None)
+                if sol is not None:
+                    save_openmm_npz(segment_outdir, times, [f[sol] for f in forces],
+                                    energy_k, energy_u, [p[sol] for p in positions_list])
+                else:
+                    save_openmm_npz(segment_outdir, times, forces, energy_k, energy_u, positions_list)
 
             self._save_final_state(simulation, segment_outdir)
             segment.pcoord = self._calculate_pcoord(segment_outdir, initial_pos, energy_data)
