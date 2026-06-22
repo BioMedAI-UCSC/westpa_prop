@@ -15,7 +15,7 @@ import os
 import numpy as np
 import h5py
 
-from computation.interface_rmsd_computation import InterfaceRMSDComputation
+from computation.capri_rmsd_computation import CapriRMSDComputation
 from computation.contact_energy_computation import ContactEnergyComputation
 from computation.rmsd_computation import RMSDComputation
 from analysis.frame_loader import load_segments
@@ -50,8 +50,8 @@ def parse_args():
 def main():
     a = parse_args()
     calcs = {
-        "lrmsd": InterfaceRMSDComputation(a.reference, a.sel_a, a.sel_b, mode="ligand"),
-        "irmsd": InterfaceRMSDComputation(a.reference, a.sel_a, a.sel_b, mode="interface"),
+        "lrmsd": CapriRMSDComputation(a.reference, a.sel_a, a.sel_b, mode="ligand"),
+        "irmsd": CapriRMSDComputation(a.reference, a.sel_a, a.sel_b, mode="interface"),
         "rmsd_ca": RMSDComputation(a.reference, atom_selection="name CA"),
         "contact_energy": ContactEnergyComputation(a.topology, a.sel_a, a.sel_b,
                                                    mode="energy_and_ncontacts"),
