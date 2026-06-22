@@ -1,4 +1,4 @@
-from openmm.unit import nanometer
+from openmm.unit import angstrom
 import numpy as np
 import mdtraj
 
@@ -25,6 +25,7 @@ class BaseDCDReporter:
         raise NotImplementedError
     
     def report(self, simulation, state):
+        # mdtraj's low-level DCDTrajectoryFile.write expects Angstrom by convention.
         xyz = self._get_positions(state)
         self._ensure_open(xyz.shape[1])
         self._dcd.write(xyz)
@@ -40,8 +41,8 @@ class BaseDCDReporter:
 class FullDCDReporter(BaseDCDReporter):
     
     def _get_positions(self, state):
-        pos_nm = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-        return pos_nm[np.newaxis, :, :]
+        pos = state.getPositions(asNumpy=True).value_in_unit(angstrom)
+        return pos[np.newaxis, :, :]
 
 
 class SoluteDCDReporter(BaseDCDReporter):
@@ -51,8 +52,8 @@ class SoluteDCDReporter(BaseDCDReporter):
         self._atom_indices = np.asarray(atom_indices, dtype=int)
     
     def _get_positions(self, state):
-        pos_nm = state.getPositions(asNumpy=True).value_in_unit(nanometer)
-        sel = pos_nm[self._atom_indices]
+        pos = state.getPositions(asNumpy=True).value_in_unit(angstrom)
+        sel = pos[self._atom_indices]
         return sel[np.newaxis, :, :]
 
 
