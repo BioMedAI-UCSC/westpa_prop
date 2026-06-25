@@ -19,6 +19,14 @@ from file_system.md_store.save_npz import save_openmm_npz
 from propagators.base_propagator import BasePropagator
 
 
+# Module-level caches keyed by PID survive across WESTPA tasks within the same
+# forked worker process. Instance attributes (self._cached_sim) do NOT, because
+# WESTPA pickles the propagator into the task queue and reconstructs it on the
+# receiving end — every task call would otherwise rebuild the OpenMM Context.
+_WORKER_SIM_CACHE = {}    # pid -> Simulation (1 per worker, bound to 1 GPU)
+_ANNOUNCED_PIDS   = set() # pids that have already printed platform info
+
+
 class OpenMMPropagator(BasePropagator):
 
     def __init__(self, rc=None):
@@ -39,14 +47,18 @@ class OpenMMPropagator(BasePropagator):
         self.save_steps          = config["save_steps"]
         self.save_format         = self._get_save_format(["west", "openmm"])
 
-        try:
+        # Set num_gpus WITHOUT touching the CUDA Platform here. _load_config
+        # runs in the parent process before WESTPA forks its workers; any CUDA
+        # init in the parent — including merely fetching the CUDA Platform
+        # object — can leave forked children unable to create CUDA contexts
+        # (CUDA_ERROR_NOT_INITIALIZED). Auto-detection (num_gpus: -1) is only
+        # honored when explicitly requested, and only then are we forced to
+        # touch CUDA pre-fork.
+        self.num_gpus = int(config.get("num_gpus", 1))
+        if self.num_gpus == -1:
             platform      = Platform.getPlatformByName("CUDA")
-            self.num_gpus = int(config.get("num_gpus", 1))
-            if self.num_gpus == -1:
-                default       = platform.getPropertyDefaultValue("CudaDeviceIndex")
-                self.num_gpus = default.count(",") + 1 if "," in default else 1
-        except Exception:
-            self.num_gpus = 1
+            default       = platform.getPropertyDefaultValue("CudaDeviceIndex")
+            self.num_gpus = default.count(",") + 1 if "," in default else 1
 
         self.gpu_precision    = config.get("gpu_precision", "single")
         self.topology_path    = os.path.expandvars(config["topology_path"])
@@ -63,7 +75,11 @@ class OpenMMPropagator(BasePropagator):
 
     def get_pcoord(self, state):
         if isinstance(state, BasisState):
-            simulation = self._create_simulation(seg_id=0)
+            # CPU-only here. get_pcoord runs in the parent w_init process,
+            # before WESTPA forks workers. Any CUDA init in the parent leaves
+            # forked children unable to create CUDA contexts (CUDA_ERROR_NOT_
+            # INITIALIZED). Use CPU for this one-shot pcoord eval.
+            simulation = self._create_cpu_simulation()
             simulation.context.setPositions(self.pdb.positions)
             simulation.minimizeEnergy()
             openmm_state = simulation.context.getState(getPositions=True, getEnergy=True)
@@ -79,14 +95,47 @@ class OpenMMPropagator(BasePropagator):
         raise NotImplementedError
 
     def _get_next_gpu_index(self, segment_id):
+        # Bind each WESTPA worker to one GPU. The work manager dispatches
+        # segments from a shared queue, so seg_id mod num_gpus does NOT pin
+        # workers — multiple workers routinely collide on a single device.
+        # Process work manager: exports WM_PROCESS_INDEX per forked worker
+        # (westpa/work_managers/processes.py:132 + environment.py:24,43).
+        # Thread work manager: names threads "worker-{i}" (threads.py:65).
+        # Both: Worker N -> GPU N.
+        wm_idx = os.environ.get('WM_PROCESS_INDEX')
+        if wm_idx is not None:
+            return int(wm_idx) % self.num_gpus
+        import threading
+        tname = threading.current_thread().name
+        if tname.startswith('worker-'):
+            try:
+                return int(tname.split('-', 1)[1]) % self.num_gpus
+            except (ValueError, IndexError):
+                pass
         return segment_id % self.num_gpus
 
     def _get_platform(self, seg_id):
-        try:
-            platform   = Platform.getPlatformByName("CUDA")
+        # Fail loud when CUDA was requested but missing. The previous version
+        # silently fell back to CPU, which meant configs asking for `num_gpus`
+        # would run entirely on CPU with the GPUs idle and no indication in
+        # any log. If you really want CPU, set num_gpus: 0 in the config.
+        if self.num_gpus > 0:
+            try:
+                platform = Platform.getPlatformByName("CUDA")
+            except Exception as e:
+                avail = [Platform.getPlatform(i).getName()
+                         for i in range(Platform.getNumPlatforms())]
+                raise RuntimeError(
+                    f"OpenMM CUDA platform requested (num_gpus={self.num_gpus}) "
+                    f"but unavailable: {e}. Available platforms: {avail}. "
+                    f"Install openmm with a CUDA build (e.g. "
+                    f"`mamba install -c conda-forge openmm cuda-version=12.9`) "
+                    f"or set num_gpus: 0 in west.cfg to run on CPU."
+                )
             gpu_index  = self._get_next_gpu_index(seg_id)
-            properties = {"CudaDeviceIndex": str(gpu_index), "Precision": self.gpu_precision}
-        except Exception:
+            properties = {"CudaDeviceIndex": str(gpu_index),
+                          "Precision":       self.gpu_precision}
+        else:
             platform   = Platform.getPlatformByName("CPU")
             properties = {}
         return platform, properties
@@ -94,8 +143,40 @@ class OpenMMPropagator(BasePropagator):
     def _create_system(self):
         raise NotImplementedError
 
+    def _create_cpu_simulation(self):
+        # Force-CPU simulation for parent-process work (basis state pcoord,
+        # one-time minimization). Bypasses _get_platform / _get_next_gpu_index
+        # so the parent never initializes CUDA — see _minimize_basis_state's
+        # comment for why. Worker processes still get CUDA via _create_simulation.
+        system     = self._create_system()
+        integrator = LangevinMiddleIntegrator(
+            self.temperature * kelvin,
+            self.friction / picosecond,
+            self.timestep * femtosecond,
+        )
+        integrator.setConstraintTolerance(self.constraintTolerance)
+        integrator.setRandomNumberSeed(random.randint(1, 1_000_000))
+        platform   = Platform.getPlatformByName("CPU")
+        print(f"[propagator] parent pid={os.getpid()} platform=CPU (one-shot setup)",
+              flush=True)
+        return Simulation(self.pdb.topology, system, integrator, platform)
+
     def _create_simulation(self, seg_id):
         platform, properties = self._get_platform(seg_id)
+        # Announce platform once per worker so it's unmistakable in w_run.log
+        # whether MD is on GPU or CPU. Key on (pid, tid) so the threads work
+        # manager (all workers share one pid, distinct tids) and the processes
+        # work manager (distinct pids, shared tid) both announce each worker.
+        import threading
+        wid = (os.getpid(), threading.get_ident())
+        if wid not in _ANNOUNCED_PIDS:
+            _ANNOUNCED_PIDS.add(wid)
+            wm_idx = os.environ.get('WM_PROCESS_INDEX', threading.current_thread().name)
+            pname  = platform.getName()
+            extra  = (f" CudaDeviceIndex={properties.get('CudaDeviceIndex','?')}"
+                      f" Precision={properties.get('Precision','-')}") if pname == "CUDA" else ""
+            print(f"[propagator] worker={wm_idx} pid={wid[0]} tid={wid[1]} "
+                  f"platform={pname}{extra}", flush=True)
         system     = self._create_system()
         integrator = LangevinMiddleIntegrator(
             self.temperature * kelvin,
@@ -161,10 +242,25 @@ class OpenMMPropagator(BasePropagator):
         raise NotImplementedError
 
     def propagate(self, segments):
-        starttime  = time.time()
-        simulation = self._create_simulation(segments[0].seg_id)
+        starttime = time.time()
+        # Cache the Simulation per worker via module-level dict keyed by
+        # (pid, tid). Per-instance caching (self._cached_sim) does NOT work
+        # because WESTPA's process work manager pickles bound methods into the
+        # task queue and reconstructs the propagator on the receiving end
+        # every task call, so per-instance state is lost between segments.
+        # Keying on (pid, tid) makes the cache correct for BOTH the processes
+        # work manager (distinct pids, one tid each) AND the threads work
+        # manager (one shared pid, distinct tids per worker). With this cache
+        # the CUDA context + kernel compile (~10s) is paid once per worker,
+        # then every subsequent segment reuses it.
+        import threading
+        wid = (os.getpid(), threading.get_ident())
+        if wid not in _WORKER_SIM_CACHE:
+            _WORKER_SIM_CACHE[wid] = self._create_simulation(segments[0].seg_id)
+        simulation = _WORKER_SIM_CACHE[wid]
 
         for segment in segments:
+            simulation.integrator.setRandomNumberSeed(random.randint(1, 1_000_000))
             segment_outdir = self._get_segment_outdir(segment)
             os.makedirs(segment_outdir, exist_ok=True)
 

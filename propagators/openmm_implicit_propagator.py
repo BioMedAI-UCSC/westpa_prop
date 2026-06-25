@@ -197,14 +197,23 @@ class OpenMMImplicitPropagator(OpenMMPropagator):
         # to 100 Å) that cause NaN coordinates within the first MD steps.  Minimizing
         # to convergence once at init removes those clashes so all new trajectories
         # start from a physically reasonable configuration.
+        #
+        # Force CPU here, NOT _get_platform(). _minimize_basis_state runs in the
+        # parent process during __init__, before WESTPA forks its worker pool.
+        # CUDA cannot be initialized pre-fork and then used in forked children
+        # — the children inherit a broken CUDA driver state and Context creation
+        # fails with CUDA_ERROR_NOT_INITIALIZED. Using CPU here keeps the parent
+        # CUDA-clean so workers can initialize CUDA fresh post-fork.
+        # 1519-atom minimization on CPU takes <1s; the GH200 saves nothing.
+        from openmm import Platform as _Platform
         system = self._create_system()
         integrator = LangevinMiddleIntegrator(
             self.temperature * kelvin,
             self.friction / picosecond,
             self.timestep * femtosecond,
         )
-        platform, properties = self._get_platform(seg_id=0)
-        sim = Simulation(self.pdb.topology, system, integrator, platform, properties)
+        platform = _Platform.getPlatformByName("CPU")
+        sim = Simulation(self.pdb.topology, system, integrator, platform)
         sim.context.setPositions(self.pdb.positions)
         sim.minimizeEnergy()
         self.pdb.positions = sim.context.getState(getPositions=True).getPositions()
